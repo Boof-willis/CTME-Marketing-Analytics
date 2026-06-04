@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { config } from "@/lib/config";
 import { setRefreshToken } from "@/lib/tokenStore";
+import { publicOrigin } from "@/lib/requestOrigin";
 
 export const dynamic = "force-dynamic";
 
@@ -8,7 +9,7 @@ export const dynamic = "force-dynamic";
 // bounces back to the Web Analytics view.
 export async function GET(req: NextRequest) {
   const params = req.nextUrl.searchParams;
-  const origin = req.nextUrl.origin;
+  const origin = publicOrigin(req);
   const state = params.get("state") || "";
   const back = (status: string) => {
     const u = new URL("/", origin);

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { config, gaConfigured } from "@/lib/config";
+import { publicOrigin } from "@/lib/requestOrigin";
 
 export const dynamic = "force-dynamic";
 
@@ -22,8 +23,7 @@ export function GET(req: NextRequest) {
     );
   }
 
-  const origin = req.nextUrl.origin;
-  const redirectUri = config.ga4.redirectUri || `${origin}/api/ga/callback`;
+  const redirectUri = config.ga4.redirectUri || `${publicOrigin(req)}/api/ga/callback`;
 
   const auth = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   auth.searchParams.set("client_id", config.ga4.oauthClientId);

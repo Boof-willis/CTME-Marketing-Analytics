@@ -51,12 +51,17 @@ services:
       - key: GOOGLE_ADS_CUSTOMER_ID
         sync: false
 
-      # --- Google Analytics 4 (OAuth, connected from the UI) ---
+      # --- Google Analytics 4 ---
+      # OAuth client id/secret fall back to the GOOGLE_ADS_* values above, so
+      # they're optional. Provide GA4_REFRESH_TOKEN to seed the connection, or
+      # leave it blank and connect from the UI ("Connect Google Analytics").
       - key: GA4_PROPERTY_ID
         sync: false
       - key: GA4_OAUTH_CLIENT_ID
         sync: false
       - key: GA4_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: GA4_REFRESH_TOKEN
         sync: false
 
       # --- Upstash Redis (durable GA4 token storage) ---
