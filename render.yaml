@@ -1,0 +1,66 @@
+# Render Blueprint — deploys the CTME dashboard as a free Node web service.
+# In Render: New > Blueprint, point it at this repo, and it reads this file.
+# Fill in the secret values (sync:false) when prompted, or in the dashboard
+# under the service's Environment tab.
+services:
+  - type: web
+    name: ctme-marketing-dashboard
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      # auto = live data when creds exist, demo otherwise.
+      - key: DATA_MODE
+        value: auto
+
+      # --- Access ---
+      - key: DASHBOARD_ACCESS_KEY
+        sync: false
+
+      # --- GoHighLevel ---
+      - key: GHL_API_TOKEN
+        sync: false
+      - key: GHL_LOCATION_ID
+        sync: false
+
+      # --- Stripe ---
+      - key: STRIPE_SECRET_KEY
+        sync: false
+
+      # --- Meta Ads ---
+      - key: META_ACCESS_TOKEN
+        sync: false
+      - key: META_AD_ACCOUNT_ID
+        sync: false
+
+      # --- Google Ads ---
+      - key: GOOGLE_ADS_DEVELOPER_TOKEN
+        sync: false
+      - key: GOOGLE_ADS_CLIENT_ID
+        sync: false
+      - key: GOOGLE_ADS_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_ADS_REFRESH_TOKEN
+        sync: false
+      - key: GOOGLE_ADS_CUSTOMER_ID
+        sync: false
+
+      # --- Google Analytics 4 (OAuth, connected from the UI) ---
+      - key: GA4_PROPERTY_ID
+        sync: false
+      - key: GA4_OAUTH_CLIENT_ID
+        sync: false
+      - key: GA4_OAUTH_CLIENT_SECRET
+        sync: false
+
+      # --- Upstash Redis (durable GA4 token storage) ---
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
