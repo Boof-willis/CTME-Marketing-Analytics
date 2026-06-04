@@ -1,7 +1,9 @@
 "use client";
 
-// Minimal brand-ish glyphs (lucide has no Google Ads mark). These accept a
-// `size` prop so they can stand in for LucideIcon where needed.
+import Image from "next/image";
+
+// Brand marks. The platform logos use real PNG assets in /public; they accept a
+// `size` prop so they can stand in for a LucideIcon where needed.
 
 export function SiGoogleads({ size = 18, className }: { size?: number; className?: string }) {
   return (
@@ -22,23 +24,26 @@ export function SiGoogleads({ size = 18, className }: { size?: number; className
 
 export function GoogleMark({ size = 18 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24">
-      <circle cx="6" cy="18" r="3" fill="#fbbc04" />
-      <path d="M3 16 9 5.5a3 3 0 0 1 5.2 3L8.2 19a3 3 0 0 1-5.2-3Z" fill="#fbbc04" />
-      <path d="M21 16 15 5.5a3 3 0 0 0-5.2 3L15.8 19a3 3 0 0 0 5.2-3Z" fill="#34a853" />
-    </svg>
+    <Image
+      src="/google-ads-favicon.png"
+      alt="Google Ads"
+      width={size}
+      height={size}
+      className="object-contain"
+      style={{ width: size, height: size }}
+    />
   );
 }
 
 export function MetaMark({ size = 18 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-      <path
-        d="M3 14c0-3.5 1.7-6.5 4-6.5 1.6 0 2.7 1.4 3.8 3.4l1.2 2.2M21 14c0-3.5-1.7-6.5-4-6.5-1.6 0-2.7 1.4-3.8 3.4l-1.2 2.2"
-        stroke="#1d8cff"
-        strokeWidth="2.4"
-        strokeLinecap="round"
-      />
-    </svg>
+    <Image
+      src="/facebook-ads-icon.png"
+      alt="Meta Ads"
+      width={size}
+      height={size}
+      className="object-contain"
+      style={{ width: size, height: size }}
+    />
   );
 }
