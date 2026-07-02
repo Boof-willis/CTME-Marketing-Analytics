@@ -2,14 +2,15 @@
 
 import clsx from "clsx";
 import Image from "next/image";
-import { LayoutDashboard, Megaphone, Sprout, BarChart3, type LucideIcon } from "lucide-react";
+import { LayoutDashboard, Settings2, Megaphone, Sprout, BarChart3, type LucideIcon } from "lucide-react";
 
-export type ViewId = "overview" | "paid" | "organic" | "analytics";
+export type ViewId = "overview" | "operations" | "paid" | "organic" | "analytics";
 
 const NAV: { id: ViewId; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
+  { id: "operations", label: "Operations", icon: Settings2 },
   { id: "paid", label: "Paid Traffic", icon: Megaphone },
-  { id: "organic", label: "Organic Traffic", icon: Sprout },
+  { id: "organic", label: "Warm Traffic", icon: Sprout },
   { id: "analytics", label: "Web Analytics", icon: BarChart3 },
 ];
 

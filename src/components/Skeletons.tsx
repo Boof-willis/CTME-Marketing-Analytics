@@ -74,6 +74,18 @@ function OverviewSkeleton() {
   );
 }
 
+function OperationsSkeleton() {
+  return (
+    <div className="space-y-5">
+      <KpiRow count={4} />
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <ChartSkeleton className="lg:col-span-2" />
+        <ChartSkeleton />
+      </div>
+    </div>
+  );
+}
+
 function PaidSkeleton() {
   return (
     <div className="space-y-5">
@@ -144,13 +156,15 @@ function AnalyticsSkeleton() {
   );
 }
 
-export type SkeletonVariant = "overview" | "paid" | "platform" | "organic" | "analytics";
+export type SkeletonVariant = "overview" | "operations" | "paid" | "platform" | "organic" | "analytics";
 
 /** Layout-aware loading skeleton, fading in so a fast load doesn't flash. */
 export function DashboardSkeleton({ variant }: { variant: SkeletonVariant }) {
   const content =
     variant === "overview" ? (
       <OverviewSkeleton />
+    ) : variant === "operations" ? (
+      <OperationsSkeleton />
     ) : variant === "paid" ? (
       <PaidSkeleton />
     ) : variant === "platform" ? (

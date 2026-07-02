@@ -1,24 +1,28 @@
 "use client";
 
 import {
-  Users,
   ShoppingCart,
   DollarSign,
   Undo2,
-  TrendingUp,
-  Receipt,
-  Wallet,
   Megaphone,
   Sprout,
 } from "lucide-react";
 import type { DashboardData } from "@/lib/types";
 import { KpiCard, StatTile } from "@/components/KpiCard";
-import { ComboChart, Donut } from "@/components/Charts";
+import { Donut } from "@/components/Charts";
 import { SectionTitle } from "@/components/ui";
 import { formatCurrency, formatNumber } from "@/lib/format";
 
 export function OverviewView({ data }: { data: DashboardData }) {
   const o = data.overview;
+  // Money KPIs are sourced from GHL fields at "current year" scope, so label them
+  // with the year rather than letting them read as date-range figures.
+  // Overview money is the "this period" view: revenue / purchases / refunds /
+  // AOV respond to the date-range picker, sourced from Stripe card payments
+  // (the only per-transaction source that can slice an arbitrary range). The
+  // authoritative all-in annual/lifetime totals (incl. crypto) live in the
+  // Operations → Financials section, sourced from GHL custom fields. LTV is the
+  // exception — it's the lifetime GHL field, not a per-period figure.
   const paidTotal = o.paidChannels.reduce((a, s) => a + s.value, 0);
   const organicTotal = o.organicChannels.reduce((a, s) => a + s.value, 0);
   const leadTotal = paidTotal + organicTotal;
@@ -27,31 +31,17 @@ export function OverviewView({ data }: { data: DashboardData }) {
     { label: "Organic", value: organicTotal, color: "#22c55e" },
   ].filter((s) => s.value > 0);
 
-  const repeatPurchaseRate = o.uniquePurchasers.value
-    ? Math.max(0, (1 - o.uniquePurchasers.value / Math.max(o.purchases.value, 1)) * 100)
-    : null;
-  const refundRate = o.purchases.value
-    ? (o.refunds.value / o.purchases.value) * 100
-    : null;
-
   return (
     <div className="space-y-5">
       {/* Headline KPI row */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
-        <KpiCard
-          label="Unique Purchasers"
-          metric={o.uniquePurchasers}
-          display={formatNumber(o.uniquePurchasers.value)}
-          icon={Users}
-          color="#3b82f6"
-        />
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
         <KpiCard
           label="Purchases"
           metric={o.purchases}
           display={formatNumber(o.purchases.value)}
           icon={ShoppingCart}
           color="#22c55e"
-          sublabel="all payments"
+          sublabel="this period"
         />
         <KpiCard
           label="Total Revenue"
@@ -59,6 +49,7 @@ export function OverviewView({ data }: { data: DashboardData }) {
           display={formatCurrency(o.revenue.value, { compact: true })}
           icon={DollarSign}
           color="#8b5cf6"
+          sublabel="this period · card"
         />
         <KpiCard
           label="Refunds"
@@ -68,85 +59,24 @@ export function OverviewView({ data }: { data: DashboardData }) {
           color="#ef4444"
           higherIsBetter={false}
           sublabel={formatCurrency(o.refundAmount.value, { compact: true })}
-        />
-        <KpiCard
-          label="Net Revenue"
-          metric={{ ...o.revenue, value: o.netRevenue }}
-          display={formatCurrency(o.netRevenue, { compact: true })}
-          icon={Wallet}
-          color="#22d3ee"
-          sublabel="rev − refunds"
+          clickableWhenEmpty
         />
       </div>
 
       {/* KPI tiles: AOV + LTV */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-2">
         <StatTile
           label="Average Order Value"
-          value={formatCurrency(o.averageOrderValue)}
+          value={o.averageOrderValue ? formatCurrency(o.averageOrderValue) : "—"}
           color="#8b5cf6"
-          hint="Total revenue ÷ # purchases"
+          hint="Total revenue ÷ # purchases (this period)"
         />
         <StatTile
           label="Lifetime Value (LTV)"
           value={formatCurrency(o.lifetimeValue)}
           color="#3b82f6"
-          hint="Avg. of GHL Lifetime Value field (contacts with a real value)"
+          hint="Avg. of GHL Lifetime Value field (all-time)"
         />
-        <StatTile
-          label="Repeat Purchase Rate"
-          value={repeatPurchaseRate === null ? "—" : `${Math.round(repeatPurchaseRate)}%`}
-          color="#22c55e"
-          hint="Share of purchases beyond first-time buyers"
-          fillPct={repeatPurchaseRate}
-        />
-        <StatTile
-          label="Refund Rate"
-          value={refundRate === null ? "—" : `${refundRate.toFixed(1)}%`}
-          color="#ef4444"
-          hint="# refunds ÷ # purchases"
-          good={refundRate === null ? null : refundRate < 5}
-          fillPct={refundRate}
-        />
-      </div>
-
-      {/* Charts row */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <div className="card p-4 lg:col-span-2">
-          <div className="mb-3 flex items-center justify-between">
-            <SectionTitle icon={TrendingUp}>Revenue vs Purchases</SectionTitle>
-            <span className="text-xs text-ink-faint">{data.meta.rangeLabel}</span>
-          </div>
-          <ComboChart
-            data={o.revenueVsPurchasesSeries}
-            series={[
-              { key: "revenue", label: "Revenue", color: "#22c55e", type: "area" },
-              { key: "purchases", label: "Purchases", color: "#3b82f6", type: "line", yAxis: "right" },
-            ]}
-          />
-        </div>
-
-        <div className="card flex flex-col p-4">
-          <SectionTitle icon={Receipt} className="mb-3">
-            Refund Reasons
-          </SectionTitle>
-          {o.refundReasons.length ? (
-            <Donut
-              slices={o.refundReasons}
-              centerLabel="refunds"
-              centerValue={formatNumber(o.refunds.value)}
-            />
-          ) : (
-            <div className="flex flex-1 flex-col items-center justify-center gap-2 py-8 text-center">
-              <span className="text-3xl font-bold text-ink">{formatNumber(o.refunds.value)}</span>
-              <span className="text-xs text-ink-faint">refunds in this period</span>
-              <p className="mt-2 max-w-[15rem] text-[11px] leading-snug text-ink-faint">
-                Reason breakdown isn&apos;t tracked yet. Add a &ldquo;Refund reason&rdquo; dropdown
-                field in GHL and it&apos;ll populate here.
-              </p>
-            </div>
-          )}
-        </div>
       </div>
 
       {/* Leads by source — paid channels vs organic channels */}

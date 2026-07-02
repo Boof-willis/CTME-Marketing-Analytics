@@ -15,6 +15,26 @@ export interface SeriesPoint {
   value: number;
 }
 
+/** A single CRM contact, used to drill down into the people behind a metric. */
+export interface Contact {
+  id: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  tags: string[];
+  /** Deep link to the contact record (opens in a new tab), null in demo mode. */
+  url: string | null;
+  /** Total purchase value attributed to this contact (currency). Set on
+   *  purchase drill-downs so the modal can show how much each buyer spent. */
+  purchaseValue?: number;
+  /** Number of purchases/transactions by this contact (shown when > 1). */
+  purchaseCount?: number;
+  /** Paid via Stripe (card) — set on purchase drill-downs. */
+  paidStripe?: boolean;
+  /** Paid via crypto (GHL crypto-payment tag or crypto revenue field). */
+  paidCrypto?: boolean;
+}
+
 /** A metric with its headline value, trend series and period-over-period delta. */
 export interface Metric {
   value: number;
@@ -22,6 +42,8 @@ export interface Metric {
   deltaPct: number | null;
   /** Sparkline / trend data across the selected range. */
   series: SeriesPoint[];
+  /** Optional sample of the contacts this metric is comprised of (drill-down). */
+  contacts?: Contact[];
 }
 
 export interface FunnelStage {
@@ -76,6 +98,8 @@ export interface OverviewMetrics {
   netRevenue: number; // revenue - refundAmount
   revenueVsPurchasesSeries: { date: string; revenue: number; purchases: number }[];
   refundReasons: DonutSlice[];
+  /** Contacts who purchased more than once (drill-down for repeat purchase rate). */
+  repeatPurchaserContacts?: Contact[];
 }
 
 /** Cold-traffic funnel dashboard metrics. */
@@ -123,6 +147,17 @@ export interface OrganicMetrics {
   callCompletedRate: number;
   closeRate: number;
   noShowRate: number;
+  /** How the warm-leads KPI is being counted, and the transition status toward
+   *  the accurate per-period count (see the "sent to sales" workflow field). */
+  warmTracking?: {
+    /** "pipeline" = all currently-tagged warm contacts (interim); "period" =
+     *  leads whose sent-to-sales date falls in the selected range (accurate). */
+    mode: "pipeline" | "period" | "created";
+    /** Contacts currently tagged warm traffic (the live pipeline). */
+    pipeline: number;
+    /** Share (0-100) of the warm pipeline that has a sent-to-sales date stamped. */
+    coverage: number;
+  };
 }
 
 /** Ad-platform view (Meta or Google). */
@@ -172,6 +207,62 @@ export interface AnalyticsMetrics {
   byDay: { date: string; sessions: number; users: number }[];
 }
 
+/** Per-year money breakdown (single-source: traditional = Stripe-synced, crypto
+ *  = crypto-synced; the two never share a field so repeat-both buyers are exact). */
+export interface MoneyYear {
+  year: number;
+  /** Stripe / traditional revenue for the year. */
+  revenue: number;
+  /** Crypto revenue for the year. */
+  cryptoRevenue: number;
+  /** Refunds for the year. */
+  refund: number;
+  /** Stripe / traditional purchase count for the year. */
+  purchases: number;
+  /** Crypto purchase count for the year. */
+  cryptoPurchases: number;
+}
+
+/** Authoritative money metrics, sourced from GHL contact custom fields (synced
+ *  from Stripe + crypto). These are lifetime / per-year aggregates, independent
+ *  of the date-range picker. The daily trend is the one exception (live Stripe). */
+export interface MoneyMetrics {
+  // ---- Lifetime totals ----
+  /** Stripe / traditional lifetime revenue. */
+  grossRevenue: number;
+  /** Crypto lifetime revenue. */
+  grossCryptoRevenue: number;
+  /** grossRevenue + grossCryptoRevenue. */
+  totalRevenue: number;
+  /** Lifetime refunds (currency). */
+  grossRefund: number;
+  /** totalRevenue − grossRefund. */
+  netRevenue: number;
+  /** Stripe / traditional lifetime purchase count. */
+  grossPurchases: number;
+  /** Crypto lifetime purchase count. */
+  grossCryptoPurchases: number;
+  /** grossPurchases + grossCryptoPurchases. */
+  totalPurchases: number;
+  /** totalRevenue / totalPurchases. */
+  averageOrderValue: number;
+  /** Contacts with any revenue > 0. */
+  uniquePurchasers: number;
+  /** Average of the GHL "Lifetime Value" field over contacts with value > 0. */
+  lifetimeValue: number;
+  /** Open invoice count and value still outstanding. */
+  pendingInvoices: number;
+  pendingInvoiceValue: number;
+  /** Contacts carrying the crypto-payment tag (head-count). */
+  cryptoClients: number;
+  /** Per-year breakdown, most recent year first. */
+  byYear: MoneyYear[];
+  /** Daily revenue trend for the selected range (live Stripe card payments). */
+  dailyRevenue: SeriesPoint[];
+  /** Most recent contact sync timestamp (ISO), for a data-freshness indicator. */
+  lastSyncedAt: string | null;
+}
+
 export interface DashboardData {
   meta: {
     mode: DataMode;
@@ -182,6 +273,8 @@ export interface DashboardData {
     generatedAt: string;
   };
   overview: OverviewMetrics;
+  /** Authoritative money view (GHL custom fields + live Stripe daily trend). */
+  money: MoneyMetrics;
   /** Paid traffic (CTME calls this "cold traffic") — combined Meta + Google. */
   cold: ColdTrafficMetrics;
   /** Organic traffic (CTME calls this "warm traffic"). */

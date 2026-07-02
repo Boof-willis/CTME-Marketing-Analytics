@@ -1,10 +1,13 @@
 "use client";
 
+import { useState } from "react";
 import clsx from "clsx";
 import type { LucideIcon } from "lucide-react";
-import type { Metric } from "@/lib/types";
+import { Users } from "lucide-react";
+import type { Contact, Metric } from "@/lib/types";
 import { Sparkline } from "./Sparkline";
 import { DeltaBadge } from "./ui";
+import { ContactsModal } from "./ContactsModal";
 
 export function KpiCard({
   label,
@@ -14,6 +17,7 @@ export function KpiCard({
   color = "#3b82f6",
   higherIsBetter = true,
   sublabel,
+  clickableWhenEmpty = false,
 }: {
   label: string;
   metric: Metric;
@@ -22,9 +26,34 @@ export function KpiCard({
   color?: string;
   higherIsBetter?: boolean;
   sublabel?: string;
+  /** Allow opening the drill-down even with no contacts (e.g. a zero-value
+   *  Refunds card that should still open to confirm "no refunds this period"). */
+  clickableWhenEmpty?: boolean;
 }) {
+  const [open, setOpen] = useState(false);
+  const contacts = metric.contacts ?? [];
+  const clickable = contacts.length > 0 || clickableWhenEmpty;
+
   return (
-    <div className="card card-hover flex flex-col justify-between overflow-hidden p-4">
+    <div
+      className={clsx(
+        "card card-hover flex flex-col justify-between overflow-hidden p-4",
+        clickable && "group cursor-pointer hover:border-brand-gold/40",
+      )}
+      onClick={clickable ? () => setOpen(true) : undefined}
+      role={clickable ? "button" : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onKeyDown={
+        clickable
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setOpen(true);
+              }
+            }
+          : undefined
+      }
+    >
       <div className="flex items-start gap-3">
         <div
           className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
@@ -44,10 +73,27 @@ export function KpiCard({
             ) : null}
           </div>
         </div>
+        {clickable ? (
+          <span
+            className="flex items-center gap-1 text-[10px] text-ink-faint opacity-0 transition-opacity group-hover:opacity-100"
+            title="View contacts"
+          >
+            <Users size={12} />
+          </span>
+        ) : null}
       </div>
       <div className={clsx("mt-3 -mx-4 -mb-4")}>
         <Sparkline data={metric.series} color={color} />
       </div>
+      {clickable ? (
+        <ContactsModal
+          open={open}
+          onClose={() => setOpen(false)}
+          title={label}
+          contacts={contacts}
+          total={metric.value}
+        />
+      ) : null}
     </div>
   );
 }
@@ -63,6 +109,9 @@ export function StatTile({
   hint,
   good,
   fillPct,
+  contacts,
+  contactsTitle,
+  contactsTotal,
 }: {
   label: string;
   value: string;
@@ -70,12 +119,44 @@ export function StatTile({
   hint?: string;
   good?: boolean | null;
   fillPct?: number | null;
+  /** Optional drill-down: the contacts behind this tile. */
+  contacts?: Contact[];
+  /** Heading for the drill-down modal (defaults to the tile label). */
+  contactsTitle?: string;
+  /** Full count behind the tile, so the modal can say "showing N of M". */
+  contactsTotal?: number;
 }) {
+  const [open, setOpen] = useState(false);
+  const list = contacts ?? [];
+  const clickable = list.length > 0;
   const hasMeter = typeof fillPct === "number" && Number.isFinite(fillPct);
   const width = hasMeter ? Math.max(0, Math.min(100, fillPct as number)) : 0;
   return (
-    <div className="card p-4">
-      <p className="label">{label}</p>
+    <div
+      className={clsx("card p-4", clickable && "group cursor-pointer card-hover hover:border-brand-gold/40")}
+      onClick={clickable ? () => setOpen(true) : undefined}
+      role={clickable ? "button" : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onKeyDown={
+        clickable
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setOpen(true);
+              }
+            }
+          : undefined
+      }
+    >
+      <div className="flex items-center justify-between">
+        <p className="label">{label}</p>
+        {clickable ? (
+          <Users
+            size={12}
+            className="text-ink-faint opacity-0 transition-opacity group-hover:opacity-100"
+          />
+        ) : null}
+      </div>
       <p
         className="mt-1 text-2xl font-bold leading-tight"
         style={{ color: good === undefined || good === null ? "#e7ecf6" : good ? "#22c55e" : "#f59e0b" }}
@@ -90,6 +171,15 @@ export function StatTile({
             style={{ width: `${width}%`, backgroundColor: color }}
           />
         </div>
+      ) : null}
+      {clickable ? (
+        <ContactsModal
+          open={open}
+          onClose={() => setOpen(false)}
+          title={contactsTitle ?? label}
+          contacts={list}
+          total={contactsTotal}
+        />
       ) : null}
     </div>
   );

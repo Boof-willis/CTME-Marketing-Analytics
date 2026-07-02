@@ -1,9 +1,10 @@
-import type { DashboardData, DateRange, Metric, SeriesPoint } from "../types";
+import type { DashboardData, DateRange, Metric, MoneyMetrics, SeriesPoint } from "../types";
 import { buildDemoData } from "../demoData";
 import { config } from "../config";
 import { previousRange } from "../dates";
-import { fetchStripe } from "./stripe";
-import { fetchGhl } from "./ghl";
+import { fetchStripe, type StripeBuyer, type StripeMetrics } from "./stripe";
+import { fetchGhl, lookupContactsByEmails, type GhlMoneyFields } from "./ghl";
+import type { Contact } from "../types";
 import { fetchMeta } from "./meta";
 import { fetchGoogle } from "./google";
 import { fetchGa } from "./ga";
@@ -116,27 +117,11 @@ export async function getDashboardData(range: DateRange): Promise<DashboardData>
       }));
     }
 
-    // Use GHL payments for money when Stripe isn't connected (CTME runs
-    // invoices through GHL). Stripe, if present, already took precedence above.
-    if (!stripe && ghl.payments) {
-      const p = ghl.payments;
-      const revSeries = seriesFrom(p.revenueByDay);
-      const purSeries = seriesFrom(p.purchasesByDay);
-      data.overview.revenue = metric(p.revenue, revSeries, data.overview.revenue.deltaPct);
-      data.overview.purchases = metric(p.purchases, purSeries, data.overview.purchases.deltaPct);
-      data.overview.uniquePurchasers = metric(p.uniquePurchasers, purSeries, data.overview.uniquePurchasers.deltaPct);
-      data.overview.refunds = metric(p.refunds, data.overview.refunds.series, null);
-      data.overview.refundAmount = metric(p.refundAmount, data.overview.refundAmount.series, null);
-      data.overview.refundReasons = [];
-      data.overview.averageOrderValue = p.purchases ? p.revenue / p.purchases : 0;
-      data.overview.lifetimeValue = p.uniquePurchasers ? p.revenue / p.uniquePurchasers : 0;
-      data.overview.netRevenue = p.revenue - p.refundAmount;
-      data.overview.revenueVsPurchasesSeries = revSeries.map((r, i) => ({
-        date: r.date,
-        revenue: r.value,
-        purchases: purSeries[i]?.value ?? 0,
-      }));
-    }
+    // NOTE: GHL payment *transactions* are no longer a money source. The
+    // authoritative top-line (revenue / purchases / refunds / AOV / LTV) comes
+    // from the synced contact custom fields, assembled into data.money below and
+    // applied to the Overview headline by applyOverviewMoney(). GHL payments are
+    // still read for the per-day shape and the contact drill-downs only.
 
     // Segment money (cold/organic) uses GHL ONLY for the split ratio, applied to
     // the authoritative top-line (Stripe if connected, else GHL). GHL counts raw
@@ -168,6 +153,19 @@ export async function getDashboardData(range: DateRange): Promise<DashboardData>
       data.overview.lifetimeValue = ghl.ltv.average;
     }
 
+    // Attach the drill-down contacts behind each purchase/refund widget. These
+    // are CRM contacts (GHL is the only source with the contact↔purchase link),
+    // so they're set even when Stripe is the authoritative money source.
+    if (ghl.contacts) {
+      const { purchases, purchasers, repeatPurchasers, refunds } = ghl.contacts;
+      // Purchases lists one row per payment; the rest are unique purchasers.
+      data.overview.purchases.contacts = purchases.length ? purchases : purchasers;
+      data.overview.uniquePurchasers.contacts = purchasers;
+      data.overview.revenue.contacts = purchasers;
+      data.overview.refunds.contacts = refunds;
+      data.overview.repeatPurchaserContacts = repeatPurchasers;
+    }
+
     // Cold-traffic funnel volumes from GHL.
     data.cold.leads = metric(ghl.coldLeads, data.cold.leads.series, data.cold.leads.deltaPct);
     data.cold.appointments = metric(ghl.coldAppointments, data.cold.appointments.series, null);
@@ -180,12 +178,58 @@ export async function getDashboardData(range: DateRange): Promise<DashboardData>
     // contact attribution; money is GHL-attributed (the only place with the
     // contact↔purchase link).
     const org = data.organic;
-    org.leads = metric(ghl.organicLeads, org.leads.series, org.leads.deltaPct);
-    org.appointments = metric(Math.max(0, ghl.appointments - ghl.coldAppointments), org.appointments.series, null);
-    org.callsCompleted = metric(Math.max(0, ghl.callsCompleted - ghl.coldCallsCompleted), org.callsCompleted.series, null);
-    org.noShows = metric(Math.max(0, ghl.noShows - ghl.coldNoShows), org.noShows.series, null);
-    if (ghl.payments) {
-      // Organic share of the authoritative top-line (see splitPurchases above).
+    // "Warm traffic" = leads tagged "warm traffic" and handed to the sales team
+    // (organic leads worked by a rep, not closed through the email system).
+    //
+    // GHL has no tag-applied timestamp, so we can't directly count "tagged this
+    // period" from the tag alone. A workflow stamps a "sent to sales" date field;
+    // once that field covers most of the warm pipeline we count by it (accurate
+    // per-period). Until then we show the live pipeline (all currently tagged),
+    // falling back to contacts created-and-tagged this period if neither exists.
+    const warmPipeline = ghl.money?.warmPipeline ?? 0;
+    const warmDates = ghl.money?.warmTaggedDates ?? [];
+    const warmCoverage = warmPipeline ? warmDates.length / warmPipeline : 0;
+    const READY = 0.8; // switch to per-period once ~80% of warm leads are dated
+    let warmLeads: number;
+    let warmMode: NonNullable<typeof org.warmTracking>["mode"];
+    if (warmPipeline > 0 && warmCoverage >= READY) {
+      warmLeads = warmDates.filter((d) => d >= range.start && d <= range.end).length;
+      warmMode = "period";
+    } else if (warmPipeline > 0) {
+      warmLeads = warmPipeline;
+      warmMode = "pipeline";
+    } else {
+      warmLeads = ghl.leads.warm;
+      warmMode = "created";
+    }
+    org.leads = metric(warmLeads, org.leads.series, org.leads.deltaPct);
+    org.warmTracking = {
+      mode: warmMode,
+      pipeline: warmPipeline,
+      coverage: Math.round(warmCoverage * 100),
+    };
+    // Meetings/held/sold are scoped to warm-tagged contacts and deduped to one
+    // count per lead (reschedules don't inflate), so the funnel nests under the
+    // warm pipeline. Falls back to calendar-based counts if the warm set is
+    // unavailable (e.g. the contact scan failed).
+    const wm = ghl.warmMeetings;
+    if (wm) {
+      org.appointments = metric(wm.scheduled, org.appointments.series, null);
+      org.callsCompleted = metric(wm.held, org.callsCompleted.series, null);
+      org.noShows = metric(wm.noShows, org.noShows.series, null);
+    } else {
+      org.appointments = metric(Math.max(0, ghl.appointments - ghl.coldAppointments), org.appointments.series, null);
+      org.callsCompleted = metric(Math.max(0, ghl.callsCompleted - ghl.coldCallsCompleted), org.callsCompleted.series, null);
+      org.noShows = metric(Math.max(0, ghl.noShows - ghl.coldNoShows), org.noShows.series, null);
+    }
+    // Sold + Revenue come from the contact money custom fields (gross_revenue /
+    // crypto, the Stripe-synced source of truth) summed over warm-tagged contacts
+    // — i.e. customers cross-referenced with the tag. These are lifetime totals
+    // (the fields are aggregates), unlike the range-scoped meetings above.
+    if (ghl.money) {
+      org.purchases = metric(ghl.money.warmCustomers, org.purchases.series, null);
+      org.revenue = metric(ghl.money.warmRevenue, org.revenue.series, null);
+    } else if (ghl.payments) {
       org.purchases = metric(splitPurchases(ghl.payments.organicPurchases), org.purchases.series, null);
       org.revenue = metric(splitRevenue(ghl.payments.organicRevenue), org.revenue.series, null);
     }
@@ -196,20 +240,50 @@ export async function getDashboardData(range: DateRange): Promise<DashboardData>
     org.callCompletedRate = org.appointments.value ? (org.callsCompleted.value / org.appointments.value) * 100 : 0;
     org.closeRate = org.callsCompleted.value ? (org.purchases.value / org.callsCompleted.value) * 100 : 0;
     org.noShowRate = org.appointments.value ? (org.noShows.value / org.appointments.value) * 100 : 0;
-    // Organic buyers mostly self-serve (they don't book a call), so a strict
-    // leads→appt→call→purchase funnel inverts. We show the booking funnel only
-    // (leads → appointments → calls completed); purchases/revenue are reported
-    // as separate outcomes with a direct lead→purchase rate in the view.
-    const ostages = [
-      { label: "Leads", value: org.leads.value },
-      { label: "Appointments", value: org.appointments.value },
-      { label: "Calls Completed", value: org.callsCompleted.value },
+    // The meeting funnel is range-scoped and per-lead (scheduled ≥ held). Sold /
+    // Revenue are NOT funnel stages here: they come from lifetime contact money
+    // fields, so they'd invert the funnel on a narrow range — they're shown as
+    // outcomes instead.
+    const wstages = [
+      { label: "Meetings Scheduled", value: org.appointments.value },
+      { label: "Meetings Held", value: org.callsCompleted.value },
     ];
-    org.funnel = ostages.map((s, i) => ({
+    org.funnel = wstages.map((s, i) => ({
       label: s.label,
       value: Math.round(s.value),
-      rateFromPrev: i === 0 ? null : ostages[i - 1].value ? (s.value / ostages[i - 1].value) * 100 : null,
+      rateFromPrev: i === 0 ? null : wstages[i - 1].value ? (s.value / wstages[i - 1].value) * 100 : null,
     }));
+  }
+
+  // ---- Money: GHL custom fields are the source of truth -------------------
+  // Lifetime / per-year revenue, refunds, purchases (for AOV), the Stripe-vs-
+  // crypto split, pending invoices and LTV all come from contact custom fields
+  // synced out of Stripe (+ crypto). The daily trend is the one live-Stripe
+  // piece (card payments, for the selected range). We only swap in live money
+  // once the fields actually carry a signal, so a location that hasn't created
+  // them yet keeps the demo placeholder instead of an all-zero panel.
+  const m = ghl?.money;
+  const hasMoneySignal =
+    !!m && (m.grossRevenue > 0 || m.grossCryptoRevenue > 0 || m.pendingInvoiceValue > 0 || m.ltvCount > 0);
+  if (hasMoneySignal) {
+    data.meta.sources.ghl = "live";
+    data.money = buildMoney(m!, stripe);
+  } else if (stripe) {
+    // No money fields yet — still show a live daily revenue trend from Stripe.
+    data.money.dailyRevenue = seriesFrom(stripe.revenueByDay).map((p) => ({
+      date: p.date,
+      value: Math.round(p.value),
+    }));
+  }
+
+  // ---- Stripe-authoritative contact drill-downs ---------------------------
+  // When Stripe is the money source, build the purchase/refund drill-downs from
+  // Stripe's actual charges (so the row count matches the headline) and enrich
+  // each buyer with their GHL contact record by email where one exists.
+  if (stripe) {
+    await applyStripeContacts(data, stripe, ghl?.money?.cryptoBuyers ?? []).catch((e) =>
+      console.warn("[contacts] stripe drill-down failed:", (e as Error).message),
+    );
   }
 
   // ---- Meta + Google -> ad spend / clicks / impressions -------------------
@@ -268,6 +342,143 @@ export async function getDashboardData(range: DateRange): Promise<DashboardData>
   recomputeColdKpis(data);
 
   return data;
+}
+
+/** Assemble the authoritative money view from GHL custom-field aggregates, with
+ *  the daily revenue trend supplied live by Stripe (card payments). */
+function buildMoney(m: GhlMoneyFields, stripe: StripeMetrics | null): MoneyMetrics {
+  const years = Object.keys(m.revenueByYear)
+    .map(Number)
+    .filter((n) => Number.isFinite(n))
+    .sort((a, b) => b - a);
+  const byYear = years.map((year) => ({
+    year,
+    revenue: m.revenueByYear[year] || 0,
+    cryptoRevenue: m.cryptoRevenueByYear[year] || 0,
+    refund: m.refundByYear[year] || 0,
+    purchases: m.purchasesByYear[year] || 0,
+    cryptoPurchases: m.cryptoPurchasesByYear[year] || 0,
+  }));
+  const totalRevenue = m.grossRevenue + m.grossCryptoRevenue;
+  const totalPurchases = m.grossPurchases + m.grossCryptoPurchases;
+  return {
+    grossRevenue: m.grossRevenue,
+    grossCryptoRevenue: m.grossCryptoRevenue,
+    totalRevenue,
+    grossRefund: m.grossRefund,
+    netRevenue: totalRevenue - m.grossRefund,
+    grossPurchases: m.grossPurchases,
+    grossCryptoPurchases: m.grossCryptoPurchases,
+    totalPurchases,
+    averageOrderValue: totalPurchases ? totalRevenue / totalPurchases : 0,
+    uniquePurchasers: m.uniquePurchasers,
+    lifetimeValue: m.ltvAverage,
+    pendingInvoices: m.pendingInvoices,
+    pendingInvoiceValue: m.pendingInvoiceValue,
+    cryptoClients: m.cryptoClients,
+    byYear,
+    dailyRevenue: stripe
+      ? seriesFrom(stripe.revenueByDay).map((p) => ({ date: p.date, value: Math.round(p.value) }))
+      : [],
+    lastSyncedAt: m.lastSyncedAt,
+  };
+}
+
+/** Build the purchase/refund contact drill-downs from Stripe charges, enriched
+ *  with matching GHL contact records (deep link, phone, tags) by email. */
+async function applyStripeContacts(
+  data: DashboardData,
+  stripe: StripeMetrics,
+  cryptoBuyers: Contact[] = [],
+) {
+  const emails = [...stripe.buyers, ...stripe.refundBuyers]
+    .map((b) => b.email)
+    .filter((e): e is string => Boolean(e));
+  const matched = emails.length ? await lookupContactsByEmails(emails) : new Map<string, Contact>();
+
+  const cryptoTags = config.ghl.tags.crypto;
+  const hasCryptoTag = (c: Contact) =>
+    c.tags.some((t) => cryptoTags.includes(t.toLowerCase().trim()));
+
+  const toContact = (b: StripeBuyer, i: number): Contact => {
+    const m = b.email ? matched.get(b.email.toLowerCase().trim()) : undefined;
+    if (m) return m;
+    return {
+      id: `stripe:${b.email || b.name || i}`,
+      name: b.name || b.email || "Unknown contact",
+      email: b.email,
+      phone: null,
+      tags: [],
+      url: null,
+    };
+  };
+
+  const CAP = 500;
+  // Aggregate one row per unique buyer: sum their amount and count transactions,
+  // keyed by email (falling back to name) so a repeat buyer collapses to a single
+  // row showing total value + how many transactions they had.
+  const aggregate = (rows: StripeBuyer[]): Contact[] => {
+    const key = (b: StripeBuyer, i: number) =>
+      (b.email && b.email.toLowerCase().trim()) || (b.name && b.name.toLowerCase().trim()) || `anon:${i}`;
+    const agg = new Map<string, { rep: StripeBuyer; index: number; value: number; count: number }>();
+    rows.forEach((b, i) => {
+      const k = key(b, i);
+      const cur = agg.get(k);
+      if (cur) {
+        cur.value += b.amount;
+        cur.count += 1;
+      } else {
+        agg.set(k, { rep: b, index: i, value: b.amount, count: 1 });
+      }
+    });
+    return [...agg.values()]
+      .sort((a, b) => b.value - a.value) // most valuable first
+      .slice(0, CAP)
+      .map(({ rep, index, value, count }) => {
+        const base = toContact(rep, index);
+        return {
+          ...base,
+          purchaseValue: value,
+          purchaseCount: count,
+          paidStripe: true,
+          paidCrypto: hasCryptoTag(base),
+        };
+      });
+  };
+
+  // Fold crypto payers (from GHL) into the Stripe purchasers: a buyer who paid
+  // both ways merges into one row (Stripe + crypto value/count, both rails
+  // flagged); a crypto-only payer is added as a new row.
+  const mergeCrypto = (list: Contact[]): Contact[] => {
+    const byEmail = new Map<string, Contact>();
+    list.forEach((c) => {
+      if (c.email) byEmail.set(c.email.toLowerCase().trim(), c);
+    });
+    for (const cb of cryptoBuyers) {
+      const existing = cb.email ? byEmail.get(cb.email.toLowerCase().trim()) : undefined;
+      if (existing) {
+        existing.paidCrypto = true;
+        existing.purchaseValue = (existing.purchaseValue || 0) + (cb.purchaseValue || 0);
+        if (cb.purchaseCount) existing.purchaseCount = (existing.purchaseCount || 0) + cb.purchaseCount;
+      } else {
+        list.push({ ...cb, paidStripe: false, paidCrypto: true });
+      }
+    }
+    return list.sort((a, b) => (b.purchaseValue || 0) - (a.purchaseValue || 0)).slice(0, CAP);
+  };
+
+  const purchasers = mergeCrypto(aggregate(stripe.buyers));
+  const refunders = aggregate(stripe.refundBuyers);
+  const repeat = purchasers.filter((c) => (c.purchaseCount || 0) >= 2);
+
+  // Purchases, unique purchasers and revenue all drill into the same per-buyer
+  // rows (each carries the buyer's total spend and transaction count); refunds
+  // get the same treatment (total refunded + number of refunds).
+  data.overview.purchases.contacts = purchasers;
+  data.overview.uniquePurchasers.contacts = purchasers;
+  data.overview.revenue.contacts = purchasers;
+  data.overview.refunds.contacts = refunders;
+  data.overview.repeatPurchaserContacts = repeat;
 }
 
 function applyPlatform(

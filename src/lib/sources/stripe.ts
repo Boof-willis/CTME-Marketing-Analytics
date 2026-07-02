@@ -13,6 +13,15 @@ const TTL = 5 * 60 * 1000; // 5 minutes
 // Returns null on any failure so the aggregator can fall back to demo data.
 // -----------------------------------------------------------------------------
 
+/** Minimal buyer identity captured off a charge/refund for the contact drill-down. */
+export interface StripeBuyer {
+  email: string | null;
+  name: string | null;
+  /** Net amount of this charge/refund (currency), so drill-downs can sum a
+   *  buyer's total spend across multiple transactions. */
+  amount: number;
+}
+
 export interface StripeMetrics {
   revenueByDay: { date: string; value: number }[];
   purchasesByDay: { date: string; value: number }[];
@@ -21,6 +30,10 @@ export interface StripeMetrics {
   uniquePurchasers: number;
   refunds: number;
   refundAmount: number;
+  /** One entry per succeeded charge (repeat buyers recur), for drill-downs. */
+  buyers: StripeBuyer[];
+  /** One entry per refund, for drill-downs. */
+  refundBuyers: StripeBuyer[];
 }
 
 function unix(d: string): number {
@@ -49,9 +62,13 @@ async function fetchStripeUncached(range: DateRange): Promise<StripeMetrics | nu
 
     let revenue = 0;
     let purchases = 0;
+    const buyers: StripeBuyer[] = [];
+    const refundBuyers: StripeBuyer[] = [];
 
-    // Iterate succeeded charges in the window.
-    for await (const charge of stripe.charges.list({ created, limit: 100 })) {
+    // Iterate succeeded charges in the window. Expand the customer so invoice /
+    // subscription charges (which often have empty billing_details) still yield
+    // an email to match against GHL and a name to display.
+    for await (const charge of stripe.charges.list({ created, limit: 100, expand: ["data.customer"] })) {
       if (charge.status !== "succeeded" || !charge.paid) continue;
       const amount = (charge.amount - (charge.amount_refunded || 0)) / 100;
       const day = toISO(new Date(charge.created * 1000));
@@ -59,17 +76,37 @@ async function fetchStripeUncached(range: DateRange): Promise<StripeMetrics | nu
       purchases += 1;
       revByDay.set(day, (revByDay.get(day) || 0) + amount);
       purByDay.set(day, (purByDay.get(day) || 0) + 1);
+      const custObj =
+        charge.customer && typeof charge.customer === "object" && !("deleted" in charge.customer)
+          ? charge.customer
+          : null;
       const cust = typeof charge.customer === "string" ? charge.customer : charge.customer?.id;
+      const buyerEmail =
+        charge.billing_details?.email || charge.receipt_email || custObj?.email || null;
       if (cust) customers.add(cust);
-      else if (charge.billing_details?.email) customers.add(charge.billing_details.email);
+      else if (buyerEmail) customers.add(buyerEmail);
+      buyers.push({
+        email: buyerEmail,
+        name: charge.billing_details?.name || custObj?.name || null,
+        amount,
+      });
     }
 
-    // Refunds in the window.
+    // Refunds in the window. Expand the charge AND its customer so we can
+    // identify the buyer even when the charge's billing_details are empty.
     let refunds = 0;
     let refundAmount = 0;
-    for await (const refund of stripe.refunds.list({ created, limit: 100 })) {
+    for await (const refund of stripe.refunds.list({ created, limit: 100, expand: ["data.charge.customer"] })) {
       refunds += 1;
       refundAmount += refund.amount / 100;
+      const ch = refund.charge && typeof refund.charge !== "string" ? refund.charge : null;
+      const rCust =
+        ch?.customer && typeof ch.customer === "object" && !("deleted" in ch.customer) ? ch.customer : null;
+      refundBuyers.push({
+        email: ch?.billing_details?.email || ch?.receipt_email || rCust?.email || null,
+        name: ch?.billing_details?.name || rCust?.name || null,
+        amount: refund.amount / 100,
+      });
     }
 
     return {
@@ -80,6 +117,8 @@ async function fetchStripeUncached(range: DateRange): Promise<StripeMetrics | nu
       uniquePurchasers: customers.size,
       refunds,
       refundAmount,
+      buyers,
+      refundBuyers,
     };
   } catch (err) {
     console.error("[stripe] live fetch failed, falling back to demo:", err);

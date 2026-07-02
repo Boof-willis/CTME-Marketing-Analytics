@@ -1,8 +1,8 @@
 import { config, hasGhl } from "../config";
-import type { DateRange } from "../types";
+import type { Contact, DateRange } from "../types";
 import { eachDay, toISO } from "../dates";
 import { parseISO } from "date-fns";
-import { cached } from "../cache";
+import { cached, deleteCached } from "../cache";
 
 // -----------------------------------------------------------------------------
 // GoHighLevel (LeadConnector) v2 API adapter.
@@ -35,6 +35,16 @@ export interface GhlPayments {
   /** Cold purchases/revenue attributed to Google ads (utm/medium). */
   googlePurchases: number;
   googleRevenue: number;
+  /** Contact id for each successful payment, in order (one entry per purchase,
+   *  so a repeat buyer appears multiple times). */
+  purchaseContactIds: string[];
+  /** # of successful payments per purchaser contact id (for repeat detection). */
+  purchaseCountById: Map<string, number>;
+  /** Contact id for each refund, in order (one entry per refund). */
+  refundContactIds: string[];
+  /** Minimal name/email/phone captured straight off the transaction, as a
+   *  fallback when the full contact record can't be fetched. */
+  contactSeed: Map<string, { name: string; email: string | null; phone: string | null }>;
 }
 
 export interface GhlMetrics {
@@ -47,8 +57,15 @@ export interface GhlMetrics {
   coldCallsCompleted: number;
   coldNoShows: number;
   payments: GhlPayments | null;
+  /** Warm sales funnel scoped to warm-tagged contacts, one count per lead
+   *  (distinct contacts), so reschedules don't inflate it. Null when the warm
+   *  contact set is unavailable (falls back to calendar-based counts). */
+  warmMeetings: { scheduled: number; held: number; noShows: number } | null;
   /** Average of the GHL "Lifetime Value" custom field over contacts with value>0. */
   ltv: { average: number; count: number } | null;
+  /** Stripe/crypto money aggregates synced onto contacts as custom fields.
+   *  GHL is the source of truth for money; this is summed across all contacts. */
+  money: GhlMoneyFields | null;
   /** Organic (non-paid) leads in the window, from contact attribution. */
   organicLeads: number;
   /** Organic lead breakdown by attribution source, largest first. */
@@ -59,6 +76,16 @@ export interface GhlMetrics {
   paidCountries: { code: string; value: number }[];
   /** Organic leads by country (ISO-2 code), largest first. */
   organicCountries: { code: string; value: number }[];
+  /** Drill-down contacts behind the purchase/refund widgets. */
+  contacts: {
+    /** One row per purchase (repeat buyers appear multiple times). */
+    purchases: Contact[];
+    /** Unique purchasers. */
+    purchasers: Contact[];
+    repeatPurchasers: Contact[];
+    /** One row per refund. */
+    refunds: Contact[];
+  };
   /** True when a core sub-fetch failed; such results are not cached. */
   degraded?: boolean;
 }
@@ -117,6 +144,78 @@ function hostOf(u?: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** Deep link to a GHL contact record (opens in the LeadConnector app). */
+function contactUrl(id: string): string | null {
+  if (!id || !config.ghl.locationId) return null;
+  return `${config.ghl.appBase}/v2/location/${config.ghl.locationId}/contacts/detail/${id}`;
+}
+
+/** Build a normalized Contact from a raw GHL contact record and/or a seed. */
+function toContact(
+  id: string,
+  raw: any | undefined,
+  seed: { name: string; email: string | null; phone: string | null } | undefined,
+): Contact {
+  const fullName =
+    (raw &&
+      (raw.contactName ||
+        [raw.firstName, raw.lastName].filter(Boolean).join(" ") ||
+        raw.name ||
+        raw.fullNameLowerCase)) ||
+    seed?.name ||
+    raw?.email ||
+    seed?.email ||
+    "Unknown contact";
+  const tags = Array.isArray(raw?.tags)
+    ? raw.tags.filter((t: unknown) => typeof t === "string" && t.trim()).map((t: string) => t.trim())
+    : [];
+  return {
+    id,
+    name: String(fullName).trim(),
+    email: (raw?.email ?? seed?.email) || null,
+    phone: (raw?.phone ?? seed?.phone) || null,
+    tags,
+    url: contactUrl(id),
+  };
+}
+
+/** Look up GHL contacts by email (for matching Stripe charges to CRM contacts).
+ *  Returns a map keyed by lowercased email. Best-effort and bounded. */
+export async function lookupContactsByEmails(emails: string[]): Promise<Map<string, Contact>> {
+  const out = new Map<string, Contact>();
+  if (!hasGhl()) return out;
+  const uniq = [...new Set(emails.map((e) => e.toLowerCase().trim()).filter(Boolean))].slice(0, 250);
+  const tasks = uniq.map((email) => async () => {
+    try {
+      const r = await ghl<{ contact?: any }>(
+        `/contacts/search/duplicate?locationId=${config.ghl.locationId}&email=${encodeURIComponent(email)}`,
+      );
+      if (r.contact && r.contact.id) {
+        out.set(email, toContact(r.contact.id, r.contact, undefined));
+      }
+    } catch {
+      // No match / unauthorized — caller falls back to the Stripe identity.
+    }
+  });
+  await pooled(tasks, 6);
+  return out;
+}
+
+/** Fetch full contact records for a bounded set of ids (name, phone, tags). */
+async function fetchContactsByIds(ids: string[]): Promise<Map<string, any>> {
+  const map = new Map<string, any>();
+  const tasks = ids.map((id) => async () => {
+    try {
+      const r = await ghl<{ contact?: any }>(`/contacts/${id}`);
+      if (r.contact) map.set(id, r.contact);
+    } catch {
+      // Best-effort: a missing/unauthorized contact just falls back to the seed.
+    }
+  });
+  await pooled(tasks, 6);
+  return map;
 }
 
 /** Returns the paid ad platform for a contact, or null if not paid. */
@@ -317,32 +416,241 @@ async function countLeads(range: DateRange) {
   return { counts, coldIds, organicIds, metaIds, googleIds, organicLeads, organicSources, paidByPlatform, paidCountries, organicCountries };
 }
 
-// ---- Average Lifetime Value from the GHL custom field ----------------------
-// Averages the "Lifetime Value" custom field across ALL contacts that have a
-// real (> 0) value. This is an all-customers metric, independent of the selected
-// date range, so it's cached separately on a longer TTL (it changes slowly).
-async function fetchAvgLtv(): Promise<{ average: number; count: number } | null> {
-  return cached("ghl:ltv", 30 * 60 * 1000, async () => {
+// ---- Money custom fields (GHL as the source of truth for money) ------------
+// CTME's GHL is fed Stripe- (and crypto-) synced money aggregates on every
+// contact: per-year + lifetime revenue / purchases / refunds, pending invoices,
+// LTV and a sync timestamp. We resolve each configured field *key* to its
+// internal id once, then page every contact and sum. These are lifetime/annual
+// aggregates (range-independent), so the whole pass is cached on a long TTL.
+
+export interface GhlMoneyFields {
+  // Lifetime ("gross") totals.
+  grossRevenue: number;
+  grossCryptoRevenue: number;
+  grossRefund: number;
+  grossPurchases: number;
+  grossCryptoPurchases: number;
+  pendingInvoices: number;
+  pendingInvoiceValue: number;
+  // Per-year breakdowns, keyed by year.
+  revenueByYear: Record<number, number>;
+  cryptoRevenueByYear: Record<number, number>;
+  refundByYear: Record<number, number>;
+  purchasesByYear: Record<number, number>;
+  cryptoPurchasesByYear: Record<number, number>;
+  // Derived head-counts.
+  uniquePurchasers: number; // contacts with any revenue > 0
+  cryptoClients: number; // contacts carrying the crypto tag
+  // Average LTV across contacts with a real (> 0) LTV value.
+  ltvAverage: number;
+  ltvCount: number;
+  // Most recent contact sync timestamp seen (ISO), for a freshness indicator.
+  lastSyncedAt: string | null;
+  contactsScanned: number;
+  /** Contacts who paid via crypto (crypto-payment tag or crypto revenue > 0),
+   *  for the purchases drill-down. Each carries their crypto value + count. */
+  cryptoBuyers: Contact[];
+  /** Count of contacts currently tagged "warm traffic" (the live warm pipeline). */
+  warmPipeline: number;
+  /** "Sent to sales" dates (yyyy-MM-dd) stamped on warm contacts by the workflow.
+   *  Coverage = length / warmPipeline; drives the per-period warm-leads count once
+   *  the field is populated for most of the pipeline. */
+  warmTaggedDates: string[];
+  /** Contact ids currently tagged warm traffic — used to scope the warm sales
+   *  funnel (meetings/held) to one count per warm-tagged lead. */
+  warmIds: string[];
+  /** Revenue (gross_revenue + gross_crypto_revenue custom fields) summed across
+   *  warm-tagged contacts — money from warm leads, source-of-truth, lifetime. */
+  warmRevenue: number;
+  /** Count of warm-tagged contacts with any revenue > 0 (warm leads who bought). */
+  warmCustomers: number;
+}
+
+/** Strip the "contact." prefix and normalize a GHL field key for matching. */
+export function normFieldKey(k: string): string {
+  return k.replace(/^contact\./i, "").trim().toLowerCase();
+}
+
+/** Resolve GHL custom field *keys* (e.g. "gross_revenue") to their internal ids.
+ *  Cached: the schema rarely changes. Returns an empty map on failure so callers
+ *  degrade to zeros rather than throwing. */
+export async function resolveCustomFieldIds(force = false): Promise<Map<string, string>> {
+  // force=true bypasses the cache — used right after the app provisions a new
+  // field so the write path can resolve it immediately (not after the TTL).
+  if (force) deleteCached("ghl:customFieldIds");
+  return cached("ghl:customFieldIds", 30 * 60 * 1000, async () => {
+    const map = new Map<string, string>();
+    try {
+      const r = await ghl<{ customFields?: any[] }>(
+        `/locations/${config.ghl.locationId}/customFields`,
+      );
+      for (const f of r.customFields || []) {
+        const key = f.fieldKey || f.key || f.name;
+        if (key && f.id) map.set(normFieldKey(String(key)), String(f.id));
+      }
+    } catch (e) {
+      console.warn("[ghl] custom-field resolve failed:", (e as Error).message);
+    }
+    return map;
+  });
+}
+
+/** Parse a possibly-formatted numeric custom-field value ("$1,200.50" -> 1200.5). */
+function parseNum(v: unknown): number {
+  if (v == null || v === "") return 0;
+  const n = parseFloat(String(v).replace(/[^0-9.\-]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
+async function fetchMoneyFields(): Promise<GhlMoneyFields | null> {
+  return cached("ghl:money", 30 * 60 * 1000, async () => {
+    const ids = await resolveCustomFieldIds();
+    const years = config.ghl.moneyYears;
+    const tpl = config.ghl.moneyFieldTemplates;
+    const mf = config.ghl.moneyFields;
+
+    // Resolve each desired key to a field id (null when the field doesn't exist
+    // in this location — its total just stays 0).
+    const idOf = (key: string): string | null => ids.get(normFieldKey(key)) ?? null;
+    const yearId = (template: string, year: number) =>
+      idOf(template.replace("{year}", String(year)));
+
+    // Pre-resolve all ids up front so the per-contact loop is cheap.
+    const grossRevenueId = idOf(mf.grossRevenue);
+    const grossCryptoRevenueId = idOf(mf.grossCryptoRevenue);
+    const grossRefundId = idOf(mf.grossRefund);
+    const grossPurchasesId = idOf(mf.grossPurchases);
+    const grossCryptoPurchasesId = idOf(mf.grossCryptoPurchases);
+    const pendingInvoicesId = idOf(mf.pendingInvoices);
+    const pendingInvoiceValueId = idOf(mf.pendingInvoiceValue);
+    const lifetimeValueId = idOf(mf.lifetimeValue) ?? config.ghl.ltvFieldId;
+    const lastSyncedAtId = idOf(mf.lastSyncedAt);
+    const yearIds = years.map((y) => ({
+      year: y,
+      revenue: yearId(tpl.revenue, y),
+      cryptoRevenue: yearId(tpl.cryptoRevenue, y),
+      refund: yearId(tpl.refund, y),
+      purchases: yearId(tpl.purchases, y),
+      cryptoPurchases: yearId(tpl.cryptoPurchases, y),
+    }));
+
+    const out: GhlMoneyFields = {
+      grossRevenue: 0,
+      grossCryptoRevenue: 0,
+      grossRefund: 0,
+      grossPurchases: 0,
+      grossCryptoPurchases: 0,
+      pendingInvoices: 0,
+      pendingInvoiceValue: 0,
+      revenueByYear: {},
+      cryptoRevenueByYear: {},
+      refundByYear: {},
+      purchasesByYear: {},
+      cryptoPurchasesByYear: {},
+      uniquePurchasers: 0,
+      cryptoClients: 0,
+      ltvAverage: 0,
+      ltvCount: 0,
+      lastSyncedAt: null,
+      contactsScanned: 0,
+      cryptoBuyers: [],
+      warmPipeline: 0,
+      warmTaggedDates: [],
+      warmIds: [],
+      warmRevenue: 0,
+      warmCustomers: 0,
+    };
+    const warmTaggedAtId = idOf(config.ghl.warmTaggedAtField);
+    years.forEach((y) => {
+      out.revenueByYear[y] = 0;
+      out.cryptoRevenueByYear[y] = 0;
+      out.refundByYear[y] = 0;
+      out.purchasesByYear[y] = 0;
+      out.cryptoPurchasesByYear[y] = 0;
+    });
+
+    let ltvSum = 0;
+    let lastSyncedMs = 0;
+
     const pageLimit = 100;
     const maxPages = 80;
-    const fieldId = config.ghl.ltvFieldId;
-
     const searchPage = (page: number) =>
       ghl<{ contacts?: any[]; total?: number }>("/contacts/search", {
         method: "POST",
         body: JSON.stringify({ locationId: config.ghl.locationId, page, pageLimit }),
       });
 
-    let sum = 0;
-    let count = 0;
     const tally = (contacts: any[]) => {
       for (const c of contacts) {
-        const f = (c.customFields || []).find((x: any) => x.id === fieldId);
-        if (!f) continue;
-        const v = parseFloat(String(f.value).replace(/[^0-9.\-]/g, ""));
-        if (Number.isFinite(v) && v > 0) {
-          sum += v;
-          count += 1;
+        out.contactsScanned += 1;
+        const fields = new Map<string, unknown>();
+        for (const f of c.customFields || c.customField || []) {
+          if (f && f.id != null) fields.set(String(f.id), f.value);
+        }
+        const val = (id: string | null) => (id ? parseNum(fields.get(id)) : 0);
+
+        const rev = val(grossRevenueId);
+        const cryptoRev = val(grossCryptoRevenueId);
+        out.grossRevenue += rev;
+        out.grossCryptoRevenue += cryptoRev;
+        out.grossRefund += val(grossRefundId);
+        out.grossPurchases += val(grossPurchasesId);
+        out.grossCryptoPurchases += val(grossCryptoPurchasesId);
+        out.pendingInvoices += val(pendingInvoicesId);
+        out.pendingInvoiceValue += val(pendingInvoiceValueId);
+        if (rev > 0 || cryptoRev > 0) out.uniquePurchasers += 1;
+        const cryptoTagged = hasAnyTag(c.tags, config.ghl.tags.crypto);
+        if (cryptoTagged) out.cryptoClients += 1;
+        // Collect crypto payers (tagged or with crypto revenue) for the drill-down.
+        if ((cryptoTagged || cryptoRev > 0) && c.id && out.cryptoBuyers.length < 500) {
+          out.cryptoBuyers.push({
+            ...toContact(c.id, c, undefined),
+            purchaseValue: cryptoRev,
+            purchaseCount: val(grossCryptoPurchasesId) || undefined,
+            paidCrypto: true,
+          });
+        }
+
+        // Warm pipeline + revenue/customers from the contact money fields, scoped
+        // to the warm-traffic tag (the source-of-truth money for warm leads).
+        if (hasAnyTag(c.tags, config.ghl.tags.warm)) {
+          out.warmPipeline += 1;
+          if (c.id) out.warmIds.push(String(c.id));
+          const warmRev = rev + cryptoRev;
+          out.warmRevenue += warmRev;
+          if (warmRev > 0) out.warmCustomers += 1;
+          if (warmTaggedAtId) {
+            const raw = fields.get(warmTaggedAtId);
+            if (raw) {
+              const d = new Date(String(raw));
+              if (Number.isFinite(d.getTime())) out.warmTaggedDates.push(toISO(d));
+            }
+          }
+        }
+
+        const ltv = val(lifetimeValueId);
+        if (ltv > 0) {
+          ltvSum += ltv;
+          out.ltvCount += 1;
+        }
+
+        if (lastSyncedAtId) {
+          const raw = fields.get(lastSyncedAtId);
+          if (raw) {
+            const ms = new Date(String(raw)).getTime();
+            if (Number.isFinite(ms) && ms > lastSyncedMs) {
+              lastSyncedMs = ms;
+              out.lastSyncedAt = new Date(ms).toISOString();
+            }
+          }
+        }
+
+        for (const y of yearIds) {
+          out.revenueByYear[y.year] += val(y.revenue);
+          out.cryptoRevenueByYear[y.year] += val(y.cryptoRevenue);
+          out.refundByYear[y.year] += val(y.refund);
+          out.purchasesByYear[y.year] += val(y.purchases);
+          out.cryptoPurchasesByYear[y.year] += val(y.cryptoPurchases);
         }
       }
     };
@@ -355,7 +663,9 @@ async function fetchAvgLtv(): Promise<{ average: number; count: number } | null>
       const rest = await pooled(Array.from({ length: pages - 1 }, (_, k) => () => searchPage(k + 2)));
       rest.forEach((r) => tally(r.contacts || []));
     }
-    return { average: count ? sum / count : 0, count };
+
+    out.ltvAverage = out.ltvCount ? ltvSum / out.ltvCount : 0;
+    return out;
   });
 }
 
@@ -371,6 +681,13 @@ async function countAppointments(range: DateRange) {
 
   const totals = { appointments: 0, callsCompleted: 0, noShows: 0 };
   const cold = { appointments: 0, callsCompleted: 0, noShows: 0 };
+  // Distinct contact ids per stage (any calendar), so the warm funnel can count
+  // one meeting per lead — reschedules/follow-ups collapse to a single contact.
+  const apptContacts = {
+    scheduled: new Set<string>(),
+    held: new Set<string>(),
+    noShow: new Set<string>(),
+  };
 
   for (const cal of calendars) {
     const isWarm = config.ghl.warmCalendarHints.some((h) => cal.name.toLowerCase().includes(h));
@@ -413,9 +730,16 @@ async function countAppointments(range: DateRange) {
         if (completed) cold.callsCompleted += 1;
         if (noShow) cold.noShows += 1;
       }
+      // Track the contact behind each appointment (one entry per contact/stage).
+      const cid = e.contactId || (e.contact && e.contact.id) || null;
+      if (cid) {
+        apptContacts.scheduled.add(String(cid));
+        if (completed) apptContacts.held.add(String(cid));
+        if (noShow) apptContacts.noShow.add(String(cid));
+      }
     }
   }
-  return { totals, cold };
+  return { totals, cold, apptContacts };
 }
 
 // ---- Payments transactions -> revenue / purchases / refunds ----------------
@@ -430,6 +754,26 @@ async function fetchPayments(
   const revByDay = new Map<string, number>(days.map((d) => [d, 0]));
   const purByDay = new Map<string, number>(days.map((d) => [d, 0]));
   const customers = new Set<string>();
+  const purchaseContactIds: string[] = [];
+  const purchaseCountById = new Map<string, number>();
+  const refundContactIds: string[] = [];
+  const contactSeed = new Map<string, { name: string; email: string | null; phone: string | null }>();
+
+  const seedFrom = (t: any) => {
+    const id: string = t.contactId;
+    if (!id || contactSeed.has(id)) return;
+    const name =
+      t.contactName ||
+      [t.contactFirstName, t.contactLastName].filter(Boolean).join(" ") ||
+      t.contactEmail ||
+      t.email ||
+      "Unknown contact";
+    contactSeed.set(id, {
+      name: String(name).trim(),
+      email: t.contactEmail || t.email || null,
+      phone: t.contactPhone || t.phone || null,
+    });
+  };
 
   let revenue = 0;
   let purchases = 0;
@@ -482,6 +826,11 @@ async function fetchPayments(
         if (purByDay.has(day)) purByDay.set(day, (purByDay.get(day) || 0) + 1);
         const cust = t.contactId || t.contactEmail;
         if (cust) customers.add(cust);
+        if (t.contactId) {
+          purchaseContactIds.push(t.contactId);
+          purchaseCountById.set(t.contactId, (purchaseCountById.get(t.contactId) || 0) + 1);
+          seedFrom(t);
+        }
         // Cold attribution reuses the cold-lead IDs gathered while counting
         // leads — no extra per-contact API calls.
         if (t.contactId && coldIds.has(t.contactId)) {
@@ -504,6 +853,10 @@ async function fetchPayments(
       if (refunded > 0 || status === "refunded") {
         refunds += 1;
         refundAmount += refunded || gross;
+        if (t.contactId) {
+          refundContactIds.push(t.contactId);
+          seedFrom(t);
+        }
       }
     }
   }
@@ -524,6 +877,41 @@ async function fetchPayments(
     metaRevenue,
     googlePurchases,
     googleRevenue,
+    purchaseContactIds,
+    purchaseCountById,
+    refundContactIds,
+    contactSeed,
+  };
+}
+
+// Cap how many rows we expose per widget (paginated 25/page in the UI) and how
+// many unique contact records we fetch for enrichment (bounds API calls).
+const MAX_DRILLDOWN = 500;
+const MAX_ENRICH = 200;
+
+/** Enrich the purchaser/refund contact ids gathered while reading payments into
+ *  full Contact records for the widget drill-downs. */
+async function buildPaymentContacts(payments: GhlPayments | null): Promise<GhlMetrics["contacts"]> {
+  const empty = { purchases: [], purchasers: [], repeatPurchasers: [], refunds: [] };
+  if (!payments) return empty;
+  const counts = payments.purchaseCountById;
+  const purchaseIds = payments.purchaseContactIds; // one per purchase, ordered
+  const refundIds = payments.refundContactIds; // one per refund, ordered
+  // Unique purchasers, most-frequent first.
+  const purchaserIds = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
+  // Fetch each distinct contact record once, bounded.
+  const union = [...new Set([...purchaseIds, ...refundIds])].slice(0, MAX_ENRICH);
+  const enriched = union.length ? await fetchContactsByIds(union) : new Map<string, any>();
+  const seed = payments.contactSeed;
+  const make = (id: string) => toContact(id, enriched.get(id), seed.get(id));
+  return {
+    purchases: purchaseIds.slice(0, MAX_DRILLDOWN).map(make),
+    purchasers: purchaserIds.slice(0, MAX_DRILLDOWN).map(make),
+    repeatPurchasers: purchaserIds
+      .filter((id) => (counts.get(id) || 0) >= 2)
+      .slice(0, MAX_DRILLDOWN)
+      .map(make),
+    refunds: refundIds.slice(0, MAX_DRILLDOWN).map(make),
   };
 }
 
@@ -558,23 +946,52 @@ export async function fetchGhl(range: DateRange): Promise<GhlMetrics | null> {
           countAppointments(range).catch((e) => {
             console.warn("[ghl] appointments failed:", (e as Error).message);
             degraded = true;
-            return { totals: { appointments: 0, callsCompleted: 0, noShows: 0 }, cold: { appointments: 0, callsCompleted: 0, noShows: 0 } };
+            return {
+              totals: { appointments: 0, callsCompleted: 0, noShows: 0 },
+              cold: { appointments: 0, callsCompleted: 0, noShows: 0 },
+              apptContacts: { scheduled: new Set<string>(), held: new Set<string>(), noShow: new Set<string>() },
+            };
           }),
         ]);
         const leads = leadsRes.counts;
-        const [payments, ltv] = await Promise.all([
+        const [payments, money] = await Promise.all([
           fetchPayments(range, leadsRes.coldIds, leadsRes.organicIds, leadsRes.metaIds, leadsRes.googleIds).catch((e) => {
             console.warn("[ghl] payments failed:", (e as Error).message);
             degraded = true;
             return null;
           }),
-          // LTV is independent of the funnel and cached separately — don't let
-          // it mark the whole result degraded.
-          fetchAvgLtv().catch((e) => {
-            console.warn("[ghl] ltv failed:", (e as Error).message);
+          // Money custom fields are the source of truth for revenue/refunds/LTV.
+          // They're range-independent and cached separately — don't let a failure
+          // here mark the whole funnel result degraded.
+          fetchMoneyFields().catch((e) => {
+            console.warn("[ghl] money fields failed:", (e as Error).message);
             return null;
           }),
         ]);
+        // Keep the legacy LTV shape populated from the combined money pass.
+        const ltv = money ? { average: money.ltvAverage, count: money.ltvCount } : null;
+
+        // Warm sales funnel: count distinct warm-tagged contacts at each stage
+        // (one per lead). Null when we have no warm contact set to scope against.
+        let warmMeetings: GhlMetrics["warmMeetings"] = null;
+        if (money && money.warmIds.length) {
+          const warmSet = new Set(money.warmIds);
+          const inWarm = (s: Set<string>) => {
+            let n = 0;
+            for (const id of s) if (warmSet.has(id)) n += 1;
+            return n;
+          };
+          warmMeetings = {
+            scheduled: inWarm(appts.apptContacts.scheduled),
+            held: inWarm(appts.apptContacts.held),
+            noShows: inWarm(appts.apptContacts.noShow),
+          };
+        }
+
+        const contacts = await buildPaymentContacts(payments).catch((e) => {
+          console.warn("[ghl] contact drill-down failed:", (e as Error).message);
+          return { purchases: [], purchasers: [], repeatPurchasers: [], refunds: [] };
+        });
 
         return {
           leads,
@@ -586,12 +1003,15 @@ export async function fetchGhl(range: DateRange): Promise<GhlMetrics | null> {
           coldCallsCompleted: appts.cold.callsCompleted,
           coldNoShows: appts.cold.noShows,
           payments,
+          warmMeetings,
           ltv,
+          money,
           organicLeads: leadsRes.organicLeads,
           organicSources: leadsRes.organicSources,
           paidLeadsByPlatform: leadsRes.paidByPlatform,
           paidCountries: leadsRes.paidCountries,
           organicCountries: leadsRes.organicCountries,
+          contacts,
           degraded,
         };
       },

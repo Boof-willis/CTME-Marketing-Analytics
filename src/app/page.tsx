@@ -6,6 +6,7 @@ import { Topbar, rangeForPreset } from "@/components/Topbar";
 import { SourcesBadge } from "@/components/SourcesBadge";
 import { SegmentedTabs } from "@/components/SegmentedTabs";
 import { OverviewView } from "@/components/views/OverviewView";
+import { OperationsView } from "@/components/views/OperationsView";
 import { PaidTrafficView } from "@/components/views/ColdTrafficView";
 import { OrganicTrafficView } from "@/components/views/OrganicTrafficView";
 import { AdPlatformView } from "@/components/views/AdPlatformView";
@@ -21,8 +22,9 @@ type PaidTab = "all" | "meta" | "google";
 
 const VIEW_META: Record<ViewId, { title: React.ReactNode; subtitle: string; accent: string }> = {
   overview: { title: "Marketing Overview", subtitle: "All traffic · purchases, revenue, refunds & leads", accent: "#beb086" },
+  operations: { title: "Operations", subtitle: "Purchasers, net revenue, refunds & retention", accent: "#beb086" },
   paid: { title: "Paid Traffic", subtitle: "Paid acquisition funnel — Meta & Google ads", accent: "#beb086" },
-  organic: { title: "Organic Traffic", subtitle: "Non-paid leads by source — referrals, direct & search", accent: "#22c55e" },
+  organic: { title: "Warm Traffic", subtitle: "Organic leads handed to the sales team — meetings, calls & closes", accent: "#22c55e" },
   analytics: { title: "Web Analytics", subtitle: "Website traffic & engagement — Google Analytics 4", accent: "#beb086" },
 };
 
@@ -54,7 +56,9 @@ export default function Page() {
   const skeletonVariant: SkeletonVariant =
     view === "overview"
       ? "overview"
-      : view === "organic"
+      : view === "operations"
+        ? "operations"
+        : view === "organic"
         ? "organic"
         : view === "analytics"
           ? "analytics"
@@ -88,6 +92,7 @@ export default function Page() {
         ) : data ? (
           <div className={loading ? "opacity-50 transition-opacity duration-300" : "animate-fade-in-up transition-opacity duration-300"}>
             {view === "overview" && <OverviewView data={data} />}
+            {view === "operations" && <OperationsView data={data} />}
             {view === "paid" && (
               <div className="space-y-5">
                 <SegmentedTabs tabs={PAID_TABS} active={paidTab} onChange={setPaidTab} />

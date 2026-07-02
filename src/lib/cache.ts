@@ -26,3 +26,7 @@ export async function cached<T>(
 export function clearCache() {
   store.clear();
 }
+
+export function deleteCached(key: string) {
+  store.delete(key);
+}

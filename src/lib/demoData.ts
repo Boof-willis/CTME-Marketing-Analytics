@@ -2,10 +2,12 @@ import type {
   AdPlatformMetrics,
   AnalyticsMetrics,
   ColdTrafficMetrics,
+  Contact,
   DashboardData,
   DateRange,
   FunnelStage,
   Metric,
+  MoneyMetrics,
   OrganicMetrics,
   OverviewMetrics,
   SeriesPoint,
@@ -77,6 +79,45 @@ function funnel(stages: { label: string; value: number }[]): FunnelStage[] {
     value: Math.round(s.value),
     rateFromPrev: i === 0 ? null : stages[i - 1].value ? (s.value / stages[i - 1].value) * 100 : null,
   }));
+}
+
+// ---- Demo contacts ----------------------------------------------------------
+const DEMO_FIRST = [
+  "James", "Olivia", "Liam", "Emma", "Noah", "Ava", "Ethan", "Sophia", "Mason",
+  "Isabella", "Lucas", "Mia", "Logan", "Charlotte", "Jackson", "Amelia", "Aiden", "Harper",
+];
+const DEMO_LAST = [
+  "Carter", "Reyes", "Nguyen", "Patel", "OBrien", "Kim", "Schmidt", "Rossi", "Andersson",
+  "Haddad", "Walsh", "Fischer", "Moreau", "Costa", "Novak", "Tanaka", "Khan", "Murphy",
+];
+
+/** Generate a deterministic set of demo contacts for a widget drill-down. */
+function demoContacts(
+  rnd: () => number,
+  n: number,
+  baseTag: string,
+  extraTag?: string,
+): Contact[] {
+  const out: Contact[] = [];
+  for (let i = 0; i < n; i++) {
+    const f = DEMO_FIRST[Math.floor(rnd() * DEMO_FIRST.length)];
+    const l = DEMO_LAST[Math.floor(rnd() * DEMO_LAST.length)];
+    const tags = [baseTag];
+    if (rnd() > 0.5) tags.push("customer");
+    if (extraTag) tags.push(extraTag);
+    const area = 200 + Math.floor(rnd() * 700);
+    const mid = 100 + Math.floor(rnd() * 900);
+    const last = 1000 + Math.floor(rnd() * 9000);
+    out.push({
+      id: `demo-${baseTag}-${i}`,
+      name: `${f} ${l}`,
+      email: `${f}.${l}`.toLowerCase() + "@example.com",
+      phone: `+1 (${area}) ${mid}-${last}`,
+      tags,
+      url: null,
+    });
+  }
+  return out;
 }
 
 /** Distribute a lead total across countries by fraction (drops empty buckets). */
@@ -160,12 +201,55 @@ export function buildDemoData(range: DateRange): DashboardData {
     purchases: purchases.series[i]?.value ?? 0,
   }));
 
+  // Sample contacts behind each purchase/refund widget (drill-down popups).
+  // Build a pool of unique purchasers, then one row per purchase (repeat buyers
+  // recur) so the Purchases popup matches the purchase count and shows pagination.
+  const poolSize = Math.min(Math.max(Math.round(uniquePurchasers.value), 6), 50);
+  const pool = demoContacts(rnd, poolSize, "warm traffic");
+  const purchaseCount = Math.min(Math.max(Math.round(purchases.value), pool.length), 120);
+  const purchaseContacts: Contact[] = Array.from(
+    { length: purchaseCount },
+    () => pool[Math.floor(rnd() * pool.length)],
+  );
+  const freq = new Map<string, number>();
+  purchaseContacts.forEach((c) => freq.set(c.id, (freq.get(c.id) || 0) + 1));
+  const aovDemo = purchases.value ? revenue.value / purchases.value : 1500;
+  const seenIds = new Set<string>();
+  // One row per unique buyer, carrying total spend and transaction count (mirrors
+  // the live Stripe→GHL drill-down), most valuable first.
+  const purchaserContacts: Contact[] = purchaseContacts
+    .filter((c) => (seenIds.has(c.id) ? false : (seenIds.add(c.id), true)))
+    .map((c) => {
+      const count = freq.get(c.id) || 1;
+      const paidCrypto = rnd() < 0.18; // a slice of buyers also paid via crypto
+      return {
+        ...c,
+        purchaseCount: count,
+        purchaseValue: Math.round(count * aovDemo),
+        paidStripe: true,
+        paidCrypto,
+        tags: paidCrypto ? [...c.tags, "crypto-payment"] : c.tags,
+      };
+    })
+    .sort((a, b) => (b.purchaseValue || 0) - (a.purchaseValue || 0));
+  const repeatPurchaserContacts = purchaserContacts
+    .filter((c) => (c.purchaseCount || 0) >= 2)
+    .map((c) => ({ ...c, tags: [...c.tags, "repeat buyer"] }));
+  const avgRefund = refunds.value ? refundAmount.value / refunds.value : 400;
+  const refundContacts = demoContacts(
+    rnd,
+    Math.min(Math.max(Math.round(refunds.value), 1), 30),
+    "cold traffic",
+    "refunded",
+  ).map((c) => ({ ...c, purchaseValue: Math.round(avgRefund), purchaseCount: 1, paidStripe: true }));
+
   const overview: OverviewMetrics = {
-    uniquePurchasers,
-    purchases,
-    revenue: { ...revenue, value: Math.round(revenue.value) },
-    refunds: { ...refunds, value: Math.round(refunds.value) },
+    uniquePurchasers: { ...uniquePurchasers, contacts: purchaserContacts },
+    purchases: { ...purchases, contacts: purchaserContacts },
+    revenue: { ...revenue, value: Math.round(revenue.value), contacts: purchaserContacts },
+    refunds: { ...refunds, value: Math.round(refunds.value), contacts: refundContacts },
     refundAmount: { ...refundAmount, value: Math.round(refundAmount.value) },
+    repeatPurchaserContacts,
     leadsBySource: {
       cold: coldLeads,
       warm: warmLeads,
@@ -224,13 +308,66 @@ export function buildDemoData(range: DateRange): DashboardData {
       ["US", 0.5], ["AU", 0.18], ["GB", 0.1], ["CA", 0.08], ["NZ", 0.05], ["HK", 0.03], ["??", 0.06],
     ]),
     funnel: funnel([
-      { label: "Leads", value: orgLeads.value },
-      { label: "Appointments", value: orgAppts.value },
-      { label: "Calls Completed", value: orgCalls.value },
+      { label: "Meetings Scheduled", value: orgAppts.value },
+      { label: "Meetings Held", value: orgCalls.value },
     ]),
     callCompletedRate: orgAppts.value ? (orgCalls.value / orgAppts.value) * 100 : 0,
     closeRate: orgCalls.value ? (orgPurch.value / orgCalls.value) * 100 : 0,
     noShowRate: orgAppts.value ? (orgNoShows.value / orgAppts.value) * 100 : 0,
+  };
+
+  // ---- Money (GHL custom fields are the source of truth; demo approximation).
+  // Per-year + lifetime aggregates, with crypto as a separate single-source
+  // stream. The daily trend reuses the overall revenue series (live = Stripe).
+  const moneyYears = [2023, 2024, 2025, 2026];
+  const yearBaseRev: Record<number, number> = {
+    2023: 182000,
+    2024: 321000,
+    2025: 548000,
+    2026: 414000, // partial year
+  };
+  const moneyByYear = moneyYears
+    .slice()
+    .reverse()
+    .map((year) => {
+      const rev = yearBaseRev[year] ?? 200000;
+      const purch = Math.max(1, Math.round(rev / 1850));
+      return {
+        year,
+        revenue: rev,
+        cryptoRevenue: Math.round(rev * 0.11),
+        refund: Math.round(rev * 0.03),
+        purchases: purch,
+        cryptoPurchases: Math.max(1, Math.round(purch * 0.08)),
+      };
+    });
+  const sumYear = (k: keyof (typeof moneyByYear)[number]) =>
+    moneyByYear.reduce((a, y) => a + (y[k] as number), 0);
+  const mGrossRevenue = sumYear("revenue");
+  const mGrossCryptoRevenue = sumYear("cryptoRevenue");
+  const mGrossPurchases = sumYear("purchases");
+  const mGrossCryptoPurchases = sumYear("cryptoPurchases");
+  const mTotalRevenue = mGrossRevenue + mGrossCryptoRevenue;
+  const mTotalPurchases = mGrossPurchases + mGrossCryptoPurchases;
+  const mGrossRefund = sumYear("refund");
+  const money: MoneyMetrics = {
+    grossRevenue: mGrossRevenue,
+    grossCryptoRevenue: mGrossCryptoRevenue,
+    totalRevenue: mTotalRevenue,
+    grossRefund: mGrossRefund,
+    netRevenue: mTotalRevenue - mGrossRefund,
+    grossPurchases: mGrossPurchases,
+    grossCryptoPurchases: mGrossCryptoPurchases,
+    totalPurchases: mTotalPurchases,
+    averageOrderValue: mTotalPurchases ? mTotalRevenue / mTotalPurchases : 0,
+    uniquePurchasers: Math.round(mTotalPurchases * 0.72),
+    lifetimeValue: 4200,
+    pendingInvoices: 6,
+    pendingInvoiceValue: 18400,
+    cryptoClients: 9,
+    byYear: moneyByYear,
+    dailyRevenue: revenue.series.map((p) => ({ date: p.date, value: Math.round(p.value) })),
+    lastSyncedAt: new Date().toISOString(),
   };
 
   // ---- Ad platform views ----------------------------------------------------
@@ -248,6 +385,7 @@ export function buildDemoData(range: DateRange): DashboardData {
       generatedAt: new Date().toISOString(),
     },
     overview,
+    money,
     cold,
     organic,
     metaAds,
