@@ -38,6 +38,7 @@ function fieldsForCrypto(t: CryptoTotals): Record<string, number | string> {
   const out: Record<string, number | string> = {};
   out[mf.grossCryptoRevenue] = Number(t.grossRevenue) || 0;
   out[mf.grossCryptoPurchases] = Number(t.grossPurchases) || 0;
+  out[mf.lastSyncedAt] = new Date().toISOString();
   for (const y of config.ghl.moneyYears) {
     const cell = t.byYear?.[String(y)] || {};
     out[tpl.cryptoRevenue.replace("{year}", String(y))] = Number(cell.revenue) || 0;
