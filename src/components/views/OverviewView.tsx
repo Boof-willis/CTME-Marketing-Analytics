@@ -6,9 +6,9 @@ import {
   Undo2,
   Megaphone,
   Sprout,
+  ChevronDown,
 } from "lucide-react";
 import { useState } from "react";
-import clsx from "clsx";
 import type { DashboardData } from "@/lib/types";
 import { KpiCard, StatTile } from "@/components/KpiCard";
 import { Donut } from "@/components/Charts";
@@ -128,7 +128,7 @@ function RevenueCard({ revenue }: { revenue: { all: number; card: number; crypto
         : "crypto revenue";
 
   return (
-    <div className="card flex flex-col justify-between overflow-hidden p-4">
+    <div className="card overflow-hidden p-4">
       <div className="flex items-start gap-3">
         <div
           className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors"
@@ -137,26 +137,33 @@ function RevenueCard({ revenue }: { revenue: { all: number; card: number; crypto
           <DollarSign size={18} />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="label truncate">Revenue</p>
+          <div className="flex items-center justify-between gap-2">
+            <p className="label truncate">Revenue</p>
+            <div className="relative shrink-0">
+              <select
+                value={rail}
+                onChange={(e) => setRail(e.target.value as "all" | "card" | "crypto")}
+                style={{ colorScheme: "dark" }}
+                aria-label="Revenue payment type"
+                className="cursor-pointer appearance-none rounded-md border border-line bg-surface/60 py-1 pl-2 pr-6 text-[11px] font-medium text-ink-muted transition-colors hover:text-ink focus:border-brand-gold/40 focus:outline-none"
+              >
+                {REV_RAILS.map((r) => (
+                  <option key={r.key} value={r.key}>
+                    {r.label}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown
+                size={12}
+                className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-ink-faint"
+              />
+            </div>
+          </div>
           <p className="mt-0.5 truncate text-2xl font-bold leading-tight text-ink">
             {formatCurrency(value, { compact: true })}
           </p>
           <p className="mt-0.5 truncate text-[11px] text-ink-faint">{sublabel}</p>
         </div>
-      </div>
-      <div className="mt-3 flex rounded-md border border-line bg-surface/60 p-0.5 text-[11px]">
-        {REV_RAILS.map((r) => (
-          <button
-            key={r.key}
-            onClick={() => setRail(r.key)}
-            className={clsx(
-              "flex-1 rounded px-2 py-1 font-medium transition-colors",
-              rail === r.key ? "bg-brand-gold/20 text-ink" : "text-ink-faint hover:text-ink",
-            )}
-          >
-            {r.label}
-          </button>
-        ))}
       </div>
     </div>
   );
