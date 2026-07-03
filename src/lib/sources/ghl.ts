@@ -3,6 +3,7 @@ import type { Contact, DateRange } from "../types";
 import { eachDay, toISO } from "../dates";
 import { parseISO } from "date-fns";
 import { cached, deleteCached } from "../cache";
+import { kvGetJSON, kvSetJSON } from "../kv";
 
 // -----------------------------------------------------------------------------
 // GoHighLevel (LeadConnector) v2 API adapter.
@@ -505,8 +506,9 @@ function parseNum(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-async function fetchMoneyFields(): Promise<GhlMoneyFields | null> {
-  return cached("ghl:money", 30 * 60 * 1000, async () => {
+// The heavy part: page every contact and sum the money custom fields. Cached by
+// fetchMoneyFields() below so this only runs on a cold miss / background refresh.
+async function scanMoneyFields(): Promise<GhlMoneyFields | null> {
     const ids = await resolveCustomFieldIds();
     const years = config.ghl.moneyYears;
     const tpl = config.ghl.moneyFieldTemplates;
@@ -688,7 +690,68 @@ async function fetchMoneyFields(): Promise<GhlMoneyFields | null> {
 
     out.ltvAverage = out.ltvCount ? ltvSum / out.ltvCount : 0;
     return out;
-  });
+}
+
+// -----------------------------------------------------------------------------
+// Durable, stale-while-revalidate cache for the money scan.
+//
+// The scan pages every contact (slow: ~seconds). It's range-independent and
+// changes only when the sync writes new field values, so we cache it aggressively:
+//   • in-memory  — instant on a warm process
+//   • Upstash    — survives restarts / redeploys / cold starts, so a fresh
+//                  instance serves the last good scan immediately instead of
+//                  re-paging thousands of contacts on the request path
+// Stale entries are served instantly and refreshed in the background (SWR), so a
+// user never waits on the scan except the very first time the cache is empty.
+// -----------------------------------------------------------------------------
+const MONEY_KV_KEY = "ghl:money:v2";
+const MONEY_SOFT_TTL_MS = 15 * 60 * 1000; // refresh in the background after 15m
+const MONEY_KV_TTL_S = 6 * 60 * 60; // keep the durable copy up to 6h
+
+interface MoneyCacheEntry {
+  value: GhlMoneyFields;
+  ts: number;
+}
+let memMoney: MoneyCacheEntry | null = null;
+let moneyRefreshing = false;
+
+/** Re-run the scan and write it to both caches. Never overwrites the last good
+ *  value with a failure. Deduped so concurrent callers share one refresh. */
+async function refreshMoney(): Promise<GhlMoneyFields | null> {
+  if (moneyRefreshing) return memMoney?.value ?? null;
+  moneyRefreshing = true;
+  try {
+    const value = await scanMoneyFields();
+    if (value) {
+      memMoney = { value, ts: Date.now() };
+      await kvSetJSON(MONEY_KV_KEY, memMoney, MONEY_KV_TTL_S);
+    }
+    return value ?? memMoney?.value ?? null;
+  } catch (err) {
+    console.warn("[ghl] money refresh failed:", (err as Error).message);
+    return memMoney?.value ?? null; // keep serving the last good scan
+  } finally {
+    moneyRefreshing = false;
+  }
+}
+
+async function fetchMoneyFields(): Promise<GhlMoneyFields | null> {
+  const now = Date.now();
+  // 1. Warm in-memory — serve instantly; kick a background refresh if stale.
+  if (memMoney) {
+    if (now - memMoney.ts > MONEY_SOFT_TTL_MS && !moneyRefreshing) void refreshMoney();
+    return memMoney.value;
+  }
+  // 2. Durable copy — survives cold starts / redeploys. Serve it instantly and
+  //    refresh in the background if it's past the soft TTL.
+  const durable = await kvGetJSON<MoneyCacheEntry>(MONEY_KV_KEY);
+  if (durable && durable.value) {
+    memMoney = durable;
+    if (now - durable.ts > MONEY_SOFT_TTL_MS && !moneyRefreshing) void refreshMoney();
+    return durable.value;
+  }
+  // 3. Nothing cached anywhere (truly first load) — do the scan synchronously.
+  return refreshMoney();
 }
 
 // ---- Calendars -> appointments / completed / no-shows ----------------------
