@@ -313,12 +313,35 @@ export async function getDashboardData(range: DateRange): Promise<DashboardData>
     };
   }
 
+  // ---- Overview purchases: card + crypto, date-scoped, so the Purchases card
+  // count equals the drill-down list (one row per transaction). ------------
+  const cryptoTxInRange = range.lifetime
+    ? data.money.cryptoTx
+    : data.money.cryptoTx.filter((t) => t.date >= range.start && t.date <= range.end);
+  {
+    const cardCount = stripe ? stripe.purchases : data.overview.purchases.value;
+    let delta: number | null = null;
+    if (!range.lifetime && stripePrev && prevRange) {
+      const prevCrypto = data.money.cryptoTx.filter(
+        (t) => t.date >= prevRange.start && t.date <= prevRange.end,
+      ).length;
+      const prevTotal = stripePrev.purchases + prevCrypto;
+      delta =
+        prevTotal > 0 ? ((cardCount + cryptoTxInRange.length - prevTotal) / prevTotal) * 100 : null;
+    }
+    data.overview.purchases = {
+      ...data.overview.purchases,
+      value: cardCount + cryptoTxInRange.length,
+      deltaPct: delta,
+    };
+  }
+
   // ---- Stripe-authoritative contact drill-downs ---------------------------
-  // When Stripe is the money source, build the purchase/refund drill-downs from
-  // Stripe's actual charges (so the row count matches the headline) and enrich
-  // each buyer with their GHL contact record by email where one exists.
+  // Build the purchase/refund drill-downs from Stripe's actual charges + the
+  // crypto payments in the window, so the Purchases row count matches the card,
+  // and enrich each buyer with their GHL contact record by email where one exists.
   if (stripe) {
-    await applyStripeContacts(data, stripe, ghl?.money?.cryptoBuyers ?? []).catch((e) =>
+    await applyStripeContacts(data, stripe, cryptoTxInRange).catch((e) =>
       console.warn("[contacts] stripe drill-down failed:", (e as Error).message),
     );
   }
@@ -418,6 +441,7 @@ function buildMoney(m: GhlMoneyFields, stripe: StripeMetrics | null): MoneyMetri
       ? seriesFrom(stripe.revenueByDay).map((p) => ({ date: p.date, value: Math.round(p.value) }))
       : [],
     cryptoRevByDay: Object.entries(m.cryptoRevByDay).map(([date, value]) => ({ date, value })),
+    cryptoTx: m.cryptoTx,
     lastSyncedAt: m.lastSyncedAt,
   };
 }
@@ -427,7 +451,7 @@ function buildMoney(m: GhlMoneyFields, stripe: StripeMetrics | null): MoneyMetri
 async function applyStripeContacts(
   data: DashboardData,
   stripe: StripeMetrics,
-  cryptoBuyers: Contact[] = [],
+  cryptoTxInRange: MoneyMetrics["cryptoTx"] = [],
 ) {
   const emails = [...stripe.buyers, ...stripe.refundBuyers]
     .map((b) => b.email)
@@ -484,35 +508,81 @@ async function applyStripeContacts(
       });
   };
 
-  // Fold crypto payers (from GHL) into the Stripe purchasers: a buyer who paid
-  // both ways merges into one row (Stripe + crypto value/count, both rails
-  // flagged); a crypto-only payer is added as a new row.
+  // Aggregate the crypto payments in the window into one row per unique buyer.
+  const aggCryptoInRange: Contact[] = (() => {
+    const map = new Map<string, Contact>();
+    cryptoTxInRange.forEach((t, i) => {
+      const k = (t.email && t.email.toLowerCase().trim()) || t.name.toLowerCase().trim() || `c:${i}`;
+      const cur = map.get(k);
+      if (cur) {
+        cur.purchaseValue = (cur.purchaseValue || 0) + t.amount;
+        cur.purchaseCount = (cur.purchaseCount || 0) + 1;
+      } else {
+        map.set(k, {
+          id: `crypto:${k}`,
+          name: t.name,
+          email: t.email,
+          phone: null,
+          tags: [],
+          url: t.url,
+          purchaseValue: t.amount,
+          purchaseCount: 1,
+          paidStripe: false,
+          paidCrypto: true,
+        });
+      }
+    });
+    return [...map.values()];
+  })();
+
+  // Fold crypto buyers into the Stripe purchasers: a buyer who paid both ways
+  // merges into one row (both rails flagged); a crypto-only payer is a new row.
   const mergeCrypto = (list: Contact[]): Contact[] => {
     const byEmail = new Map<string, Contact>();
     list.forEach((c) => {
       if (c.email) byEmail.set(c.email.toLowerCase().trim(), c);
     });
-    for (const cb of cryptoBuyers) {
+    for (const cb of aggCryptoInRange) {
       const existing = cb.email ? byEmail.get(cb.email.toLowerCase().trim()) : undefined;
       if (existing) {
         existing.paidCrypto = true;
         existing.purchaseValue = (existing.purchaseValue || 0) + (cb.purchaseValue || 0);
         if (cb.purchaseCount) existing.purchaseCount = (existing.purchaseCount || 0) + cb.purchaseCount;
       } else {
-        list.push({ ...cb, paidStripe: false, paidCrypto: true });
+        list.push({ ...cb });
       }
     }
     return list.sort((a, b) => (b.purchaseValue || 0) - (a.purchaseValue || 0)).slice(0, CAP);
   };
 
+  // Purchases drill-down = ONE ROW PER TRANSACTION (card charge + crypto payment
+  // in the window), so the row count matches the Purchases card exactly.
+  const cardPurchaseRows: Contact[] = stripe.buyers.map((b, i) => {
+    const base = toContact(b, i);
+    return { ...base, purchaseValue: b.amount, purchaseCount: 1, paidStripe: true, paidCrypto: hasCryptoTag(base) };
+  });
+  const cryptoPurchaseRows: Contact[] = cryptoTxInRange.map((t, i) => ({
+    id: `cryptotx:${(t.email || t.name || "x").toLowerCase()}:${t.date}:${i}`,
+    name: t.name,
+    email: t.email,
+    phone: null,
+    tags: [],
+    url: t.url,
+    purchaseValue: t.amount,
+    purchaseCount: 1,
+    paidStripe: false,
+    paidCrypto: true,
+  }));
+  const perPurchase = [...cardPurchaseRows, ...cryptoPurchaseRows]
+    .sort((a, b) => (b.purchaseValue || 0) - (a.purchaseValue || 0))
+    .slice(0, CAP);
+
+  // Unique Purchasers + Revenue drill into one row per unique buyer.
   const purchasers = mergeCrypto(aggregate(stripe.buyers));
   const refunders = aggregate(stripe.refundBuyers);
   const repeat = purchasers.filter((c) => (c.purchaseCount || 0) >= 2);
 
-  // Purchases, unique purchasers and revenue all drill into the same per-buyer
-  // rows (each carries the buyer's total spend and transaction count); refunds
-  // get the same treatment (total refunded + number of refunds).
-  data.overview.purchases.contacts = purchasers;
+  data.overview.purchases.contacts = perPurchase;
   data.overview.uniquePurchasers.contacts = purchasers;
   data.overview.revenue.contacts = purchasers;
   data.overview.refunds.contacts = refunders;

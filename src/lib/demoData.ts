@@ -373,6 +373,7 @@ export function buildDemoData(range: DateRange): DashboardData {
     byYear: moneyByYear,
     dailyRevenue: revenue.series.map((p) => ({ date: p.date, value: Math.round(p.value) })),
     cryptoRevByDay: revenue.series.map((p) => ({ date: p.date, value: Math.round(p.value * 0.6) })),
+    cryptoTx: [],
     lastSyncedAt: new Date().toISOString(),
   };
 

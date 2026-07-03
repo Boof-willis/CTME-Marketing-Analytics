@@ -26,6 +26,13 @@ export function ContactsModal({
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
+  // Client-side pagination keeps the table fast even with hundreds of rows.
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(20);
+  useEffect(() => {
+    setPage(0);
+  }, [open, pageSize]);
+
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -49,6 +56,11 @@ export function ContactsModal({
   const hasValue = contacts.some((c) => typeof c.purchaseValue === "number");
   const hasTags = contacts.some((c) => c.tags.length > 0);
   const hasPayment = contacts.some((c) => c.paidStripe || c.paidCrypto);
+
+  const pageCount = Math.max(1, Math.ceil(shown / pageSize));
+  const safePage = Math.min(page, pageCount - 1);
+  const start = safePage * pageSize;
+  const pageItems = contacts.slice(start, start + pageSize);
 
   return createPortal(
     <div
@@ -106,9 +118,9 @@ export function ContactsModal({
                 </tr>
               </thead>
               <tbody>
-                {contacts.map((c, i) => (
+                {pageItems.map((c, i) => (
                   <ContactRow
-                    key={`${c.id}-${i}`}
+                    key={`${c.id}-${start + i}`}
                     contact={c}
                     showValue={hasValue}
                     showTags={hasTags}
@@ -119,6 +131,47 @@ export function ContactsModal({
             </table>
           )}
         </div>
+
+        {shown > pageSize || pageSize !== 20 ? (
+          <div className="flex items-center justify-between gap-3 border-t border-panel-border px-4 py-2.5 text-xs text-ink-faint">
+            <div className="flex items-center gap-1.5">
+              <span>Rows</span>
+              {[20, 50].map((n) => (
+                <button
+                  key={n}
+                  onClick={() => setPageSize(n)}
+                  className={clsx(
+                    "rounded px-1.5 py-0.5 font-medium transition-colors",
+                    pageSize === n ? "bg-brand-gold/20 text-ink" : "hover:text-ink",
+                  )}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-3">
+              <span>
+                {start + 1}–{Math.min(start + pageSize, shown)} of {formatNumber(shown)}
+              </span>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setPage(safePage - 1)}
+                  disabled={safePage === 0}
+                  className="rounded border border-panel-border px-2 py-1 font-medium transition-colors hover:text-ink disabled:opacity-40"
+                >
+                  Prev
+                </button>
+                <button
+                  onClick={() => setPage(safePage + 1)}
+                  disabled={safePage >= pageCount - 1}
+                  className="rounded border border-panel-border px-2 py-1 font-medium transition-colors hover:text-ink disabled:opacity-40"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>,
     document.body,

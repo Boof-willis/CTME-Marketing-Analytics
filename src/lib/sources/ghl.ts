@@ -442,6 +442,9 @@ export interface GhlMoneyFields {
   /** Crypto revenue by calendar day (yyyy-MM-dd), parsed from each contact's
    *  crypto_payment_history log — lets the Overview slice crypto by date range. */
   cryptoRevByDay: Record<string, number>;
+  /** One entry per crypto payment (date + amount + who), parsed from the history
+   *  logs — powers date-range crypto purchase counts + the Purchases drill-down. */
+  cryptoTx: { date: string; amount: number; name: string; email: string | null; url: string | null }[];
   // Derived head-counts.
   uniquePurchasers: number; // contacts with any revenue > 0
   cryptoClients: number; // contacts who paid via crypto (crypto revenue > 0, or tagged)
@@ -554,6 +557,7 @@ async function scanMoneyFields(): Promise<GhlMoneyFields | null> {
       purchasesByYear: {},
       cryptoPurchasesByYear: {},
       cryptoRevByDay: {},
+      cryptoTx: [],
       uniquePurchasers: 0,
       cryptoClients: 0,
       ltvAverage: 0,
@@ -655,15 +659,28 @@ async function scanMoneyFields(): Promise<GhlMoneyFields | null> {
         }
 
         // Parse the dated crypto payment log ("yyyy-MM-dd · $X,XXX.XX · crypto")
-        // into a by-day map so the Overview can slice crypto by date range.
+        // into a by-day map + a per-transaction list, so the Overview can slice
+        // crypto by date range (revenue) and drill into crypto purchases.
         if (cryptoHistId) {
           const hist = fields.get(cryptoHistId);
           if (typeof hist === "string" && hist) {
+            const cc = c.id ? toContact(c.id, c, undefined) : null;
             for (const line of hist.split("\n")) {
               const m = line.match(/(\d{4}-\d{2}-\d{2}).*?\$\s*([\d,]+(?:\.\d+)?)/);
               if (m) {
                 const amt = parseFloat(m[2].replace(/,/g, ""));
-                if (amt > 0) out.cryptoRevByDay[m[1]] = (out.cryptoRevByDay[m[1]] || 0) + amt;
+                if (amt > 0) {
+                  out.cryptoRevByDay[m[1]] = (out.cryptoRevByDay[m[1]] || 0) + amt;
+                  if (out.cryptoTx.length < 5000) {
+                    out.cryptoTx.push({
+                      date: m[1],
+                      amount: amt,
+                      name: cc?.name || "Crypto payer",
+                      email: cc?.email ?? null,
+                      url: cc?.url ?? null,
+                    });
+                  }
+                }
               }
             }
           }
@@ -704,7 +721,7 @@ async function scanMoneyFields(): Promise<GhlMoneyFields | null> {
 // Stale entries are served instantly and refreshed in the background (SWR), so a
 // user never waits on the scan except the very first time the cache is empty.
 // -----------------------------------------------------------------------------
-const MONEY_KV_KEY = "ghl:money:v2";
+const MONEY_KV_KEY = "ghl:money:v3"; // bump when GhlMoneyFields shape changes
 const MONEY_SOFT_TTL_MS = 15 * 60 * 1000; // refresh in the background after 15m
 const MONEY_KV_TTL_S = 6 * 60 * 60; // keep the durable copy up to 6h
 
