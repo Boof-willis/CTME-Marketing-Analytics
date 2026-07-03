@@ -579,13 +579,22 @@ async function applyStripeContacts(
 
   // Unique Purchasers + Revenue drill into one row per unique buyer.
   const purchasers = mergeCrypto(aggregate(stripe.buyers));
-  const refunders = aggregate(stripe.refundBuyers);
   const repeat = purchasers.filter((c) => (c.purchaseCount || 0) >= 2);
+
+  // Refunds drill-down = one row per refund (Stripe only — crypto refunds aren't
+  // tracked as dated records), so its count matches the Refunds card.
+  const refundRows = stripe.refundBuyers
+    .map((b, i) => {
+      const base = toContact(b, i);
+      return { ...base, purchaseValue: b.amount, purchaseCount: 1, paidStripe: true };
+    })
+    .sort((a, b) => (b.purchaseValue || 0) - (a.purchaseValue || 0))
+    .slice(0, CAP);
 
   data.overview.purchases.contacts = perPurchase;
   data.overview.uniquePurchasers.contacts = purchasers;
   data.overview.revenue.contacts = purchasers;
-  data.overview.refunds.contacts = refunders;
+  data.overview.refunds.contacts = refundRows;
   data.overview.repeatPurchaserContacts = repeat;
 }
 
