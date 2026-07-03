@@ -64,7 +64,7 @@ export function OverviewView({ data }: { data: DashboardData }) {
           label="Average Order Value"
           value={o.averageOrderValue ? formatCurrency(o.averageOrderValue) : "—"}
           color="#8b5cf6"
-          hint="Total revenue ÷ # purchases (this period)"
+          hint="Revenue ÷ transactions · card + crypto (this period)"
         />
         <StatTile
           label="Lifetime Value (LTV)"

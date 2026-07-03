@@ -100,7 +100,6 @@ export async function getDashboardData(range: DateRange): Promise<DashboardData>
     // No refund-reason source exists yet (no GHL "Refund reason" field), so don't
     // show fabricated demo reasons against the real refund count.
     data.overview.refundReasons = [];
-    data.overview.averageOrderValue = stripe.purchases ? stripe.revenue / stripe.purchases : 0;
     data.overview.lifetimeValue = stripe.uniquePurchasers ? stripe.revenue / stripe.uniquePurchasers : 0;
     data.overview.netRevenue = stripe.revenue - stripe.refundAmount;
     data.overview.revenueVsPurchasesSeries = revSeries.map((r, i) => ({
@@ -344,6 +343,13 @@ export async function getDashboardData(range: DateRange): Promise<DashboardData>
       deltaPct: delta,
     };
   }
+
+  // Overview AOV = all-in revenue (card + crypto) in the window ÷ all-in
+  // transactions in the window, so it matches the Revenue + Purchases cards.
+  data.overview.averageOrderValue =
+    data.overview.purchases.value > 0
+      ? data.overview.railRevenue.all / data.overview.purchases.value
+      : 0;
 
   // ---- Stripe-authoritative contact drill-downs ---------------------------
   // Build the purchase/refund drill-downs from Stripe's actual charges + the
