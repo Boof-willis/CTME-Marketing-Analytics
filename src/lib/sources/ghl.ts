@@ -478,6 +478,9 @@ export interface GhlMoneyFields {
   warmRevenue: number;
   /** Count of warm-tagged contacts with any revenue > 0 (warm leads who bought). */
   warmCustomers: number;
+  /** Warm-tagged contacts (for the Warm Traffic drill-downs). Each carries their
+   *  total revenue (card + crypto) + purchase count; buyers have purchaseValue > 0. */
+  warmContacts: Contact[];
 }
 
 /** Strip the "contact." prefix and normalize a GHL field key for matching. */
@@ -577,6 +580,7 @@ async function scanMoneyFields(): Promise<GhlMoneyFields | null> {
       warmIds: [],
       warmRevenue: 0,
       warmCustomers: 0,
+      warmContacts: [],
     };
     const warmTaggedAtId = idOf(config.ghl.warmTaggedAtField);
     years.forEach((y) => {
@@ -639,6 +643,16 @@ async function scanMoneyFields(): Promise<GhlMoneyFields | null> {
           const warmRev = rev + cryptoRev;
           out.warmRevenue += warmRev;
           if (warmRev > 0) out.warmCustomers += 1;
+          if (c.id && out.warmContacts.length < 1500) {
+            const cnt = val(grossPurchasesId) + val(grossCryptoPurchasesId);
+            out.warmContacts.push({
+              ...toContact(c.id, c, undefined),
+              purchaseValue: warmRev > 0 ? warmRev : undefined,
+              purchaseCount: cnt > 0 ? cnt : undefined,
+              paidStripe: rev > 0,
+              paidCrypto: cryptoRev > 0,
+            });
+          }
           if (warmTaggedAtId) {
             const raw = fields.get(warmTaggedAtId);
             if (raw) {
@@ -729,7 +743,7 @@ async function scanMoneyFields(): Promise<GhlMoneyFields | null> {
 // Stale entries are served instantly and refreshed in the background (SWR), so a
 // user never waits on the scan except the very first time the cache is empty.
 // -----------------------------------------------------------------------------
-const MONEY_KV_KEY = "ghl:money:v4"; // bump when GhlMoneyFields shape changes
+const MONEY_KV_KEY = "ghl:money:v5"; // bump when GhlMoneyFields shape changes
 const MONEY_SOFT_TTL_MS = 15 * 60 * 1000; // refresh in the background after 15m
 const MONEY_KV_TTL_S = 6 * 60 * 60; // keep the durable copy up to 6h
 

@@ -255,6 +255,17 @@ export async function getDashboardData(range: DateRange): Promise<DashboardData>
       org.purchases = metric(splitPurchases(ghl.payments.organicPurchases), org.purchases.series, null);
       org.revenue = metric(splitRevenue(ghl.payments.organicRevenue), org.revenue.series, null);
     }
+    // Clickable drill-downs: Leads = all warm-tagged contacts; Sold + Revenue =
+    // the warm contacts who actually bought (revenue > 0), matching the counts.
+    if (ghl.money?.warmContacts?.length) {
+      const warm = ghl.money.warmContacts;
+      const warmBuyers = warm
+        .filter((c) => (c.purchaseValue ?? 0) > 0)
+        .sort((a, b) => (b.purchaseValue || 0) - (a.purchaseValue || 0));
+      org.leads.contacts = warm;
+      org.purchases.contacts = warmBuyers;
+      org.revenue.contacts = warmBuyers;
+    }
     if (ghl.organicSources.length) {
       org.sources = ghl.organicSources.map((s, i) => ({ label: s.label, value: s.value, color: sourceColor(s.label, i) }));
     }
