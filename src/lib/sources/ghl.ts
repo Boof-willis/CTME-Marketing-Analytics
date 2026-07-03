@@ -440,7 +440,7 @@ export interface GhlMoneyFields {
   cryptoPurchasesByYear: Record<number, number>;
   // Derived head-counts.
   uniquePurchasers: number; // contacts with any revenue > 0
-  cryptoClients: number; // contacts carrying the crypto tag
+  cryptoClients: number; // contacts who paid via crypto (crypto revenue > 0, or tagged)
   // Average LTV across contacts with a real (> 0) LTV value.
   ltvAverage: number;
   ltvCount: number;
@@ -600,7 +600,9 @@ async function fetchMoneyFields(): Promise<GhlMoneyFields | null> {
         out.pendingInvoiceValue += val(pendingInvoiceValueId);
         if (rev > 0 || cryptoRev > 0) out.uniquePurchasers += 1;
         const cryptoTagged = hasAnyTag(c.tags, config.ghl.tags.crypto);
-        if (cryptoTagged) out.cryptoClients += 1;
+        // A crypto client = anyone who actually paid via crypto (crypto revenue > 0),
+        // or is explicitly tagged. Don't rely on the tag alone — it isn't always set.
+        if (cryptoRev > 0 || cryptoTagged) out.cryptoClients += 1;
         // Collect crypto payers (tagged or with crypto revenue) for the drill-down.
         if ((cryptoTagged || cryptoRev > 0) && c.id && out.cryptoBuyers.length < 500) {
           out.cryptoBuyers.push({

@@ -66,7 +66,21 @@ function Financials({ money }: { money: MoneyMetrics }) {
   const [scope, setScope] = useState<YearScope>("lifetime");
   const s = scopeOf(money, scope);
   const cryptoShare = s.totalRevenue ? (s.cryptoRevenue / s.totalRevenue) * 100 : 0;
-  const maxYearTotal = Math.max(1, ...money.byYear.map((y) => y.revenue + y.cryptoRevenue));
+  // Year bars, plus a "Legacy" bucket for lifetime revenue not attributed to any
+  // tracked year — undated/imported gross_revenue on contacts with no dated
+  // transaction (mostly pre-2023 customers) + a few undated crypto rows. Surfacing
+  // it makes the bars reconcile with the lifetime total instead of looking short.
+  const yearRows: { label: string; revenue: number; cryptoRevenue: number }[] = money.byYear.map((y) => ({
+    label: String(y.year),
+    revenue: y.revenue,
+    cryptoRevenue: y.cryptoRevenue,
+  }));
+  const legacyStripe = Math.max(0, money.grossRevenue - money.byYear.reduce((a, y) => a + y.revenue, 0));
+  const legacyCrypto = Math.max(0, money.grossCryptoRevenue - money.byYear.reduce((a, y) => a + y.cryptoRevenue, 0));
+  if (legacyStripe + legacyCrypto >= 1) {
+    yearRows.push({ label: "Legacy", revenue: legacyStripe, cryptoRevenue: legacyCrypto });
+  }
+  const maxYearTotal = Math.max(1, ...yearRows.map((y) => y.revenue + y.cryptoRevenue));
   const scopeLabel = scope === "lifetime" ? "Lifetime" : String(scope);
 
   const dailyData = money.dailyRevenue.map((p) => ({ date: p.date, revenue: p.value }));
@@ -178,13 +192,22 @@ function Financials({ money }: { money: MoneyMetrics }) {
           </div>
         </div>
         <div className="space-y-2.5">
-          {money.byYear.map((y) => {
+          {yearRows.map((y) => {
             const total = y.revenue + y.cryptoRevenue;
             const width = (total / maxYearTotal) * 100;
             const stripePct = total ? (y.revenue / total) * 100 : 0;
             return (
-              <div key={y.year} className="flex items-center gap-3">
-                <span className="w-10 shrink-0 text-xs font-medium text-ink-faint">{y.year}</span>
+              <div key={y.label} className="flex items-center gap-3">
+                <span
+                  className="w-14 shrink-0 text-xs font-medium text-ink-faint"
+                  title={
+                    y.label === "Legacy"
+                      ? "Revenue recorded with no dated transaction — imported / pre-2023 customers"
+                      : undefined
+                  }
+                >
+                  {y.label}
+                </span>
                 <div className="flex h-5 flex-1 overflow-hidden rounded bg-surface/60">
                   <div className="flex h-full" style={{ width: `${Math.max(width, 1)}%` }}>
                     <div className="h-full" style={{ width: `${stripePct}%`, background: STRIPE_COLOR }} />
