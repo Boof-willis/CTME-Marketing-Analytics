@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import clsx from "clsx";
-import type { DashboardData, MoneyMetrics } from "@/lib/types";
+import type { DashboardData } from "@/lib/types";
 import { KpiCard, StatTile } from "@/components/KpiCard";
 import { Donut } from "@/components/Charts";
 import { SectionTitle } from "@/components/ui";
@@ -45,7 +45,7 @@ export function OverviewView({ data }: { data: DashboardData }) {
           color="#22c55e"
           sublabel="this period"
         />
-        <RevenueCard money={data.money} />
+        <RevenueCard revenue={o.railRevenue} />
         <KpiCard
           label="Refunds"
           metric={o.refunds}
@@ -105,29 +105,27 @@ export function OverviewView({ data }: { data: DashboardData }) {
   );
 }
 
-// Overview revenue headline with an in-card rail toggle. All figures are all-time
-// and all-in (GHL money fields), since crypto only exists at year/lifetime scope
-// and can't be sliced by the date picker like Stripe card revenue can.
+// Overview revenue headline with an in-card rail toggle. Values are the
+// range-scoped rail revenue (data.overview.railRevenue): date-responsive for a
+// dated window, all-in GHL aggregates at Lifetime.
 const REV_RAILS = [
-  { key: "all", label: "All", color: "#8b5cf6" },
-  { key: "stripe", label: "Stripe", color: "#635bff" },
-  { key: "crypto", label: "Crypto", color: "#f7931a" },
+  { key: "all", label: "All" },
+  { key: "card", label: "Stripe" },
+  { key: "crypto", label: "Crypto" },
 ] as const;
 
-function RevenueCard({ money }: { money: MoneyMetrics }) {
-  const [rail, setRail] = useState<"all" | "stripe" | "crypto">("all");
-  const value =
-    rail === "stripe" ? money.grossRevenue : rail === "crypto" ? money.grossCryptoRevenue : money.totalRevenue;
-  const color = rail === "stripe" ? "#635bff" : rail === "crypto" ? "#f7931a" : "#8b5cf6";
+function RevenueCard({ revenue }: { revenue: { all: number; card: number; crypto: number } }) {
+  const [rail, setRail] = useState<"all" | "card" | "crypto">("all");
+  const value = revenue[rail];
+  const color = rail === "card" ? "#635bff" : rail === "crypto" ? "#f7931a" : "#8b5cf6";
   const sublabel =
     rail === "all"
-      ? `${formatCurrency(money.grossRevenue, { compact: true })} card + ${formatCurrency(
-          money.grossCryptoRevenue,
-          { compact: true },
-        )} crypto`
-      : rail === "stripe"
-        ? "all-time · card"
-        : "all-time · crypto";
+      ? `${formatCurrency(revenue.card, { compact: true })} card + ${formatCurrency(revenue.crypto, {
+          compact: true,
+        })} crypto`
+      : rail === "card"
+        ? "card revenue"
+        : "crypto revenue";
 
   return (
     <div className="card flex flex-col justify-between overflow-hidden p-4">

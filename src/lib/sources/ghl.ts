@@ -438,6 +438,9 @@ export interface GhlMoneyFields {
   refundByYear: Record<number, number>;
   purchasesByYear: Record<number, number>;
   cryptoPurchasesByYear: Record<number, number>;
+  /** Crypto revenue by calendar day (yyyy-MM-dd), parsed from each contact's
+   *  crypto_payment_history log — lets the Overview slice crypto by date range. */
+  cryptoRevByDay: Record<string, number>;
   // Derived head-counts.
   uniquePurchasers: number; // contacts with any revenue > 0
   cryptoClients: number; // contacts who paid via crypto (crypto revenue > 0, or tagged)
@@ -525,6 +528,7 @@ async function fetchMoneyFields(): Promise<GhlMoneyFields | null> {
     const pendingInvoiceValueId = idOf(mf.pendingInvoiceValue);
     const lifetimeValueId = idOf(mf.lifetimeValue) ?? config.ghl.ltvFieldId;
     const lastSyncedAtId = idOf(mf.lastSyncedAt);
+    const cryptoHistId = idOf(mf.cryptoPaymentHistory);
     const yearIds = years.map((y) => ({
       year: y,
       revenue: yearId(tpl.revenue, y),
@@ -547,6 +551,7 @@ async function fetchMoneyFields(): Promise<GhlMoneyFields | null> {
       refundByYear: {},
       purchasesByYear: {},
       cryptoPurchasesByYear: {},
+      cryptoRevByDay: {},
       uniquePurchasers: 0,
       cryptoClients: 0,
       ltvAverage: 0,
@@ -643,6 +648,21 @@ async function fetchMoneyFields(): Promise<GhlMoneyFields | null> {
             if (Number.isFinite(ms) && ms > lastSyncedMs) {
               lastSyncedMs = ms;
               out.lastSyncedAt = new Date(ms).toISOString();
+            }
+          }
+        }
+
+        // Parse the dated crypto payment log ("yyyy-MM-dd · $X,XXX.XX · crypto")
+        // into a by-day map so the Overview can slice crypto by date range.
+        if (cryptoHistId) {
+          const hist = fields.get(cryptoHistId);
+          if (typeof hist === "string" && hist) {
+            for (const line of hist.split("\n")) {
+              const m = line.match(/(\d{4}-\d{2}-\d{2}).*?\$\s*([\d,]+(?:\.\d+)?)/);
+              if (m) {
+                const amt = parseFloat(m[2].replace(/,/g, ""));
+                if (amt > 0) out.cryptoRevByDay[m[1]] = (out.cryptoRevByDay[m[1]] || 0) + amt;
+              }
             }
           }
         }

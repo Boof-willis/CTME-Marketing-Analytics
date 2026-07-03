@@ -249,6 +249,11 @@ export function buildDemoData(range: DateRange): DashboardData {
     revenue: { ...revenue, value: Math.round(revenue.value), contacts: purchaserContacts },
     refunds: { ...refunds, value: Math.round(refunds.value), contacts: refundContacts },
     refundAmount: { ...refundAmount, value: Math.round(refundAmount.value) },
+    railRevenue: {
+      all: Math.round(revenue.value * 1.6),
+      card: Math.round(revenue.value),
+      crypto: Math.round(revenue.value * 0.6),
+    },
     repeatPurchaserContacts,
     leadsBySource: {
       cold: coldLeads,
@@ -367,6 +372,7 @@ export function buildDemoData(range: DateRange): DashboardData {
     cryptoClients: 9,
     byYear: moneyByYear,
     dailyRevenue: revenue.series.map((p) => ({ date: p.date, value: Math.round(p.value) })),
+    cryptoRevByDay: revenue.series.map((p) => ({ date: p.date, value: Math.round(p.value * 0.6) })),
     lastSyncedAt: new Date().toISOString(),
   };
 

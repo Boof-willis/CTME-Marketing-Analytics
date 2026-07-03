@@ -82,6 +82,11 @@ export interface OverviewMetrics {
   revenue: Metric;
   refunds: Metric;
   refundAmount: Metric;
+  /** Revenue split by rail (card / crypto / all) for the SELECTED range —
+   *  date-responsive for dated ranges; at Lifetime it uses the all-in GHL
+   *  aggregates so the undated "Legacy" revenue still reconciles with Financials.
+   *  Drives the Overview revenue card + its All/Stripe/Crypto toggle. */
+  railRevenue: { all: number; card: number; crypto: number };
   leadsBySource: {
     cold: number;
     warm: number;
@@ -259,6 +264,10 @@ export interface MoneyMetrics {
   byYear: MoneyYear[];
   /** Daily revenue trend for the selected range (live Stripe card payments). */
   dailyRevenue: SeriesPoint[];
+  /** Crypto revenue by calendar day, parsed from crypto_payment_history, so the
+   *  Overview revenue card can slice crypto by an arbitrary date range (the
+   *  aggregate fields above are lifetime/per-year only). */
+  cryptoRevByDay: SeriesPoint[];
   /** Most recent contact sync timestamp (ISO), for a data-freshness indicator. */
   lastSyncedAt: string | null;
 }

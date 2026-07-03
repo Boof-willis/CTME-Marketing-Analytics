@@ -290,6 +290,29 @@ export async function getDashboardData(range: DateRange): Promise<DashboardData>
     }));
   }
 
+  // ---- Overview revenue rails (card / crypto / all) -----------------------
+  // Date-responsive for a dated range: card = Stripe charges in the window,
+  // crypto = the dated payment history in the window. At Lifetime we use the
+  // all-in GHL aggregates instead, so the undated "Legacy" revenue is included
+  // and the card still reconciles with Financials ($3.2M).
+  if (range.lifetime) {
+    data.overview.railRevenue = {
+      all: data.money.totalRevenue,
+      card: data.money.grossRevenue,
+      crypto: data.money.grossCryptoRevenue,
+    };
+  } else {
+    const cryptoInRange = data.money.cryptoRevByDay
+      .filter((p) => p.date >= range.start && p.date <= range.end)
+      .reduce((a, p) => a + p.value, 0);
+    const cardInRange = stripe ? stripe.revenue : data.overview.revenue.value;
+    data.overview.railRevenue = {
+      all: cardInRange + cryptoInRange,
+      card: cardInRange,
+      crypto: cryptoInRange,
+    };
+  }
+
   // ---- Stripe-authoritative contact drill-downs ---------------------------
   // When Stripe is the money source, build the purchase/refund drill-downs from
   // Stripe's actual charges (so the row count matches the headline) and enrich
@@ -394,6 +417,7 @@ function buildMoney(m: GhlMoneyFields, stripe: StripeMetrics | null): MoneyMetri
     dailyRevenue: stripe
       ? seriesFrom(stripe.revenueByDay).map((p) => ({ date: p.date, value: Math.round(p.value) }))
       : [],
+    cryptoRevByDay: Object.entries(m.cryptoRevByDay).map(([date, value]) => ({ date, value })),
     lastSyncedAt: m.lastSyncedAt,
   };
 }
