@@ -444,7 +444,14 @@ export interface GhlMoneyFields {
   cryptoRevByDay: Record<string, number>;
   /** One entry per crypto payment (date + amount + who), parsed from the history
    *  logs — powers date-range crypto purchase counts + the Purchases drill-down. */
-  cryptoTx: { date: string; amount: number; name: string; email: string | null; url: string | null }[];
+  cryptoTx: {
+    date: string;
+    amount: number;
+    name: string;
+    email: string | null;
+    url: string | null;
+    tags: string[];
+  }[];
   // Derived head-counts.
   uniquePurchasers: number; // contacts with any revenue > 0
   cryptoClients: number; // contacts who paid via crypto (crypto revenue > 0, or tagged)
@@ -678,6 +685,7 @@ async function scanMoneyFields(): Promise<GhlMoneyFields | null> {
                       name: cc?.name || "Crypto payer",
                       email: cc?.email ?? null,
                       url: cc?.url ?? null,
+                      tags: cc?.tags ?? [],
                     });
                   }
                 }
@@ -721,7 +729,7 @@ async function scanMoneyFields(): Promise<GhlMoneyFields | null> {
 // Stale entries are served instantly and refreshed in the background (SWR), so a
 // user never waits on the scan except the very first time the cache is empty.
 // -----------------------------------------------------------------------------
-const MONEY_KV_KEY = "ghl:money:v3"; // bump when GhlMoneyFields shape changes
+const MONEY_KV_KEY = "ghl:money:v4"; // bump when GhlMoneyFields shape changes
 const MONEY_SOFT_TTL_MS = 15 * 60 * 1000; // refresh in the background after 15m
 const MONEY_KV_TTL_S = 6 * 60 * 60; // keep the durable copy up to 6h
 

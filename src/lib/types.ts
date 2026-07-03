@@ -271,7 +271,14 @@ export interface MoneyMetrics {
   /** Individual crypto transactions (date + amount + who), parsed from the
    *  payment-history logs — powers date-range crypto purchase counts and the
    *  Purchases drill-down (one row per crypto payment). */
-  cryptoTx: { date: string; amount: number; name: string; email: string | null; url: string | null }[];
+  cryptoTx: {
+    date: string;
+    amount: number;
+    name: string;
+    email: string | null;
+    url: string | null;
+    tags: string[];
+  }[];
   /** Most recent contact sync timestamp (ISO), for a data-freshness indicator. */
   lastSyncedAt: string | null;
 }
