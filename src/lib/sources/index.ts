@@ -55,12 +55,16 @@ export async function getDashboardData(range: DateRange): Promise<DashboardData>
 
   if (config.mode === "demo") return data;
 
-  const [stripe, ghl, meta, google, ga] = await Promise.all([
+  // Previous equal-length window, for REAL period-over-period deltas (skipped for
+  // lifetime, where a "previous period" is meaningless). Cached like any range.
+  const prevRange = range.lifetime ? null : previousRange(range);
+  const [stripe, ghl, meta, google, ga, stripePrev] = await Promise.all([
     fetchStripe(range),
     fetchGhl(range),
     fetchMeta(range),
     fetchGoogle(range),
     fetchGa(range),
+    prevRange ? fetchStripe(prevRange) : Promise.resolve(null),
   ]);
 
   // Per-platform paid customers (CRM-attributed, scaled to the authoritative
@@ -74,15 +78,25 @@ export async function getDashboardData(range: DateRange): Promise<DashboardData>
     data.meta.sources.stripe = "live";
     const revSeries = seriesFrom(stripe.revenueByDay);
     const purSeries = seriesFrom(stripe.purchasesByDay);
-    data.overview.revenue = metric(stripe.revenue, revSeries, data.overview.revenue.deltaPct);
-    data.overview.purchases = metric(stripe.purchases, purSeries, data.overview.purchases.deltaPct);
+    // Real period-over-period deltas from the previous equal-length window —
+    // null for lifetime or when there was no prior activity (never demo values).
+    const pctChange = (cur: number, prev: number): number | null =>
+      prev > 0 ? ((cur - prev) / prev) * 100 : null;
+    const revDelta = stripePrev ? pctChange(stripe.revenue, stripePrev.revenue) : null;
+    const purDelta = stripePrev ? pctChange(stripe.purchases, stripePrev.purchases) : null;
+    const upDelta = stripePrev ? pctChange(stripe.uniquePurchasers, stripePrev.uniquePurchasers) : null;
+    const refDelta = stripePrev ? pctChange(stripe.refunds, stripePrev.refunds) : null;
+    data.overview.revenue = metric(stripe.revenue, revSeries, revDelta);
+    data.overview.purchases = metric(stripe.purchases, purSeries, purDelta);
     data.overview.uniquePurchasers = metric(
       stripe.uniquePurchasers,
       purSeries.map((p) => ({ date: p.date, value: p.value })),
-      data.overview.uniquePurchasers.deltaPct,
+      upDelta,
     );
-    data.overview.refunds = metric(stripe.refunds, data.overview.refunds.series, null);
-    data.overview.refundAmount = metric(stripe.refundAmount, data.overview.refundAmount.series, null);
+    // Stripe has no refund-by-day series wired up, so show the real count/amount
+    // without a fabricated demo sparkline behind it.
+    data.overview.refunds = metric(stripe.refunds, [], refDelta);
+    data.overview.refundAmount = metric(stripe.refundAmount, [], null);
     // No refund-reason source exists yet (no GHL "Refund reason" field), so don't
     // show fabricated demo reasons against the real refund count.
     data.overview.refundReasons = [];
