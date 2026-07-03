@@ -7,7 +7,9 @@ import {
   Megaphone,
   Sprout,
 } from "lucide-react";
-import type { DashboardData } from "@/lib/types";
+import { useState } from "react";
+import clsx from "clsx";
+import type { DashboardData, MoneyMetrics } from "@/lib/types";
 import { KpiCard, StatTile } from "@/components/KpiCard";
 import { Donut } from "@/components/Charts";
 import { SectionTitle } from "@/components/ui";
@@ -43,14 +45,7 @@ export function OverviewView({ data }: { data: DashboardData }) {
           color="#22c55e"
           sublabel="this period"
         />
-        <KpiCard
-          label="Total Revenue"
-          metric={o.revenue}
-          display={formatCurrency(o.revenue.value, { compact: true })}
-          icon={DollarSign}
-          color="#8b5cf6"
-          sublabel="this period · card"
-        />
+        <RevenueCard money={data.money} />
         <KpiCard
           label="Refunds"
           metric={o.refunds}
@@ -105,6 +100,65 @@ export function OverviewView({ data }: { data: DashboardData }) {
             total={organicTotal}
           />
         </div>
+      </div>
+    </div>
+  );
+}
+
+// Overview revenue headline with an in-card rail toggle. All figures are all-time
+// and all-in (GHL money fields), since crypto only exists at year/lifetime scope
+// and can't be sliced by the date picker like Stripe card revenue can.
+const REV_RAILS = [
+  { key: "all", label: "All", color: "#8b5cf6" },
+  { key: "stripe", label: "Stripe", color: "#635bff" },
+  { key: "crypto", label: "Crypto", color: "#f7931a" },
+] as const;
+
+function RevenueCard({ money }: { money: MoneyMetrics }) {
+  const [rail, setRail] = useState<"all" | "stripe" | "crypto">("all");
+  const value =
+    rail === "stripe" ? money.grossRevenue : rail === "crypto" ? money.grossCryptoRevenue : money.totalRevenue;
+  const color = rail === "stripe" ? "#635bff" : rail === "crypto" ? "#f7931a" : "#8b5cf6";
+  const sublabel =
+    rail === "all"
+      ? `${formatCurrency(money.grossRevenue, { compact: true })} card + ${formatCurrency(
+          money.grossCryptoRevenue,
+          { compact: true },
+        )} crypto`
+      : rail === "stripe"
+        ? "all-time · card"
+        : "all-time · crypto";
+
+  return (
+    <div className="card flex flex-col justify-between overflow-hidden p-4">
+      <div className="flex items-start gap-3">
+        <div
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors"
+          style={{ backgroundColor: `${color}1f`, color }}
+        >
+          <DollarSign size={18} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="label truncate">Revenue</p>
+          <p className="mt-0.5 truncate text-2xl font-bold leading-tight text-ink">
+            {formatCurrency(value, { compact: true })}
+          </p>
+          <p className="mt-0.5 truncate text-[11px] text-ink-faint">{sublabel}</p>
+        </div>
+      </div>
+      <div className="mt-3 flex rounded-md border border-line bg-surface/60 p-0.5 text-[11px]">
+        {REV_RAILS.map((r) => (
+          <button
+            key={r.key}
+            onClick={() => setRail(r.key)}
+            className={clsx(
+              "flex-1 rounded px-2 py-1 font-medium transition-colors",
+              rail === r.key ? "bg-brand-gold/20 text-ink" : "text-ink-faint hover:text-ink",
+            )}
+          >
+            {r.label}
+          </button>
+        ))}
       </div>
     </div>
   );
