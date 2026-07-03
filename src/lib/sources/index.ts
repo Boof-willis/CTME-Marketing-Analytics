@@ -145,8 +145,17 @@ export async function getDashboardData(range: DateRange): Promise<DashboardData>
     // with the Overview numbers.
     const ghlTotalPur = ghl.payments ? ghl.payments.purchases || 0 : 0;
     const ghlTotalRev = ghl.payments ? ghl.payments.revenue || 0 : 0;
-    const authPurchases = stripe ? stripe.purchases : ghlTotalPur;
-    const authRevenue = stripe ? stripe.revenue : ghlTotalRev;
+    // Fold crypto in the selected window into the authoritative totals, so the
+    // paid/organic segment splits below (cold purchases + revenue, Meta/Google
+    // purchases → CAC) scale with crypto instead of Stripe card alone.
+    const cryptoTxAll = ghl.money?.cryptoTx ?? [];
+    const cryptoInRange = range.lifetime
+      ? cryptoTxAll
+      : cryptoTxAll.filter((t) => t.date >= range.start && t.date <= range.end);
+    const cryptoCount = cryptoInRange.length;
+    const cryptoRev = cryptoInRange.reduce((a, t) => a + t.amount, 0);
+    const authPurchases = (stripe ? stripe.purchases : ghlTotalPur) + cryptoCount;
+    const authRevenue = (stripe ? stripe.revenue : ghlTotalRev) + cryptoRev;
     const splitPurchases = (attributed: number) =>
       ghlTotalPur ? Math.round(authPurchases * (attributed / ghlTotalPur)) : 0;
     const splitRevenue = (attributed: number) =>
