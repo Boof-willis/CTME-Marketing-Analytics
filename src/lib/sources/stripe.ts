@@ -20,6 +20,8 @@ export interface StripeBuyer {
   /** Net amount of this charge/refund (currency), so drill-downs can sum a
    *  buyer's total spend across multiple transactions. */
   amount: number;
+  /** ISO timestamp of the charge/refund, so drill-downs can show & sort by date. */
+  date: string;
 }
 
 export interface StripeMetrics {
@@ -89,6 +91,7 @@ async function fetchStripeUncached(range: DateRange): Promise<StripeMetrics | nu
         email: buyerEmail,
         name: charge.billing_details?.name || custObj?.name || null,
         amount,
+        date: new Date(charge.created * 1000).toISOString(),
       });
     }
 
@@ -106,6 +109,7 @@ async function fetchStripeUncached(range: DateRange): Promise<StripeMetrics | nu
         email: ch?.billing_details?.email || ch?.receipt_email || rCust?.email || null,
         name: ch?.billing_details?.name || rCust?.name || null,
         amount: refund.amount / 100,
+        date: new Date(refund.created * 1000).toISOString(),
       });
     }
 

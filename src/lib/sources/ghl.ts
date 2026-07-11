@@ -39,6 +39,9 @@ export interface GhlPayments {
   /** Contact id for each successful payment, in order (one entry per purchase,
    *  so a repeat buyer appears multiple times). */
   purchaseContactIds: string[];
+  /** ISO timestamp for each successful payment, parallel to
+   *  {@link purchaseContactIds} — lets the purchases drill-down show & sort by date. */
+  purchaseDates: string[];
   /** # of successful payments per purchaser contact id (for repeat detection). */
   purchaseCountById: Map<string, number>;
   /** Contact id for each refund, in order (one entry per refund). */
@@ -73,6 +76,11 @@ export interface GhlMetrics {
   organicSources: { label: string; value: number }[];
   /** Paid leads split by ad platform, from contact attribution (utm/medium). */
   paidLeadsByPlatform: { meta: number; google: number; other: number };
+  /** Drill-down lead contacts per paid ad platform (bounded sample). */
+  paidLeadContacts: { meta: Contact[]; google: Contact[]; other: Contact[] };
+  /** Drill-down lead contacts per organic source label (bounded sample),
+   *  keyed to match {@link organicSources} labels. */
+  organicSourceContacts: Record<string, Contact[]>;
   /** Paid leads by country (ISO-2 code), largest first. */
   paidCountries: { code: string; value: number }[];
   /** Organic leads by country (ISO-2 code), largest first. */
@@ -330,6 +338,9 @@ async function countLeads(range: DateRange) {
   const metaIds = new Set<string>();
   const googleIds = new Set<string>();
   const organicMap = new Map<string, number>();
+  // Bounded per-channel lead samples so each traffic source is a drill-down.
+  const paidLeadContacts = { meta: [] as Contact[], google: [] as Contact[], other: [] as Contact[] };
+  const organicLeadContacts = new Map<string, Contact[]>();
   const paidByPlatform = { meta: 0, google: 0, other: 0 };
   const paidCountryMap = new Map<string, number>();
   const organicCountryMap = new Map<string, number>();
@@ -367,19 +378,34 @@ async function countLeads(range: DateRange) {
       const plat = paidPlatform(c);
       const isPaid = plat !== null || hasAnyTag(c.tags, config.ghl.tags.cold);
       const code = normalizeCountryCode(c.country || (c.address && c.address.country));
+      // Tag each lead with its date added so the drill-downs sort most-recent
+      // first (leads have no purchase date; this is their created date).
+      const contact = c.id
+        ? { ...toContact(c.id, c, undefined), lastPurchaseAt: c.dateAdded || undefined }
+        : null;
+      const sample = (arr: Contact[]) => {
+        if (contact && arr.length < MAX_DRILLDOWN) arr.push(contact);
+      };
       if (isPaid) {
         // Cold-tagged contacts without meta/google attribution still count as
         // paid — bucket them as "other" so paid channels sum to all paid leads.
         if (plat) {
           paidByPlatform[plat] += 1;
           if (c.id) (plat === "meta" ? metaIds : googleIds).add(c.id);
-        } else paidByPlatform.other += 1;
+          sample(paidLeadContacts[plat]);
+        } else {
+          paidByPlatform.other += 1;
+          sample(paidLeadContacts.other);
+        }
         paidCountryMap.set(code, (paidCountryMap.get(code) || 0) + 1);
       } else {
         const s = organicSource(c);
         organicMap.set(s, (organicMap.get(s) || 0) + 1);
         organicLeads += 1;
         if (c.id) organicIds.add(c.id);
+        let arr = organicLeadContacts.get(s);
+        if (!arr) organicLeadContacts.set(s, (arr = []));
+        sample(arr);
         organicCountryMap.set(code, (organicCountryMap.get(code) || 0) + 1);
       }
     }
@@ -409,12 +435,42 @@ async function countLeads(range: DateRange) {
     else organicSources.push({ label: "Other", value: restTotal });
   }
 
+  // Lead-contact samples keyed to the final organicSources labels, folding the
+  // overflow sources into the "Other" bucket so every legend row is a drill-down.
+  const organicSourceContacts: Record<string, Contact[]> = {};
+  for (const [label] of sorted.slice(0, TOP)) {
+    organicSourceContacts[label] = organicLeadContacts.get(label) || [];
+  }
+  if (restTotal > 0) {
+    const other = organicSourceContacts["Other"] ? [...organicSourceContacts["Other"]] : [];
+    for (const [label] of sorted.slice(TOP)) {
+      for (const ct of organicLeadContacts.get(label) || []) {
+        if (other.length >= MAX_DRILLDOWN) break;
+        other.push(ct);
+      }
+    }
+    organicSourceContacts["Other"] = other;
+  }
+
   // "OTHER" (overflow of small countries) is kept distinct from "??" (contacts
   // with no country on record) so they don't merge into one ambiguous row.
   const paidCountries = rankTop(paidCountryMap, 8, "OTHER");
   const organicCountries = rankTop(organicCountryMap, 8, "OTHER");
 
-  return { counts, coldIds, organicIds, metaIds, googleIds, organicLeads, organicSources, paidByPlatform, paidCountries, organicCountries };
+  return {
+    counts,
+    coldIds,
+    organicIds,
+    metaIds,
+    googleIds,
+    organicLeads,
+    organicSources,
+    paidByPlatform,
+    paidLeadContacts,
+    organicSourceContacts,
+    paidCountries,
+    organicCountries,
+  };
 }
 
 // ---- Money custom fields (GHL as the source of truth for money) ------------
@@ -879,6 +935,7 @@ async function fetchPayments(
   const purByDay = new Map<string, number>(days.map((d) => [d, 0]));
   const customers = new Set<string>();
   const purchaseContactIds: string[] = [];
+  const purchaseDates: string[] = [];
   const purchaseCountById = new Map<string, number>();
   const refundContactIds: string[] = [];
   const contactSeed = new Map<string, { name: string; email: string | null; phone: string | null }>();
@@ -952,6 +1009,7 @@ async function fetchPayments(
         if (cust) customers.add(cust);
         if (t.contactId) {
           purchaseContactIds.push(t.contactId);
+          purchaseDates.push(String(t.createdAt || t.updatedAt || ""));
           purchaseCountById.set(t.contactId, (purchaseCountById.get(t.contactId) || 0) + 1);
           seedFrom(t);
         }
@@ -1002,6 +1060,7 @@ async function fetchPayments(
     googlePurchases,
     googleRevenue,
     purchaseContactIds,
+    purchaseDates,
     purchaseCountById,
     refundContactIds,
     contactSeed,
@@ -1020,6 +1079,7 @@ async function buildPaymentContacts(payments: GhlPayments | null): Promise<GhlMe
   if (!payments) return empty;
   const counts = payments.purchaseCountById;
   const purchaseIds = payments.purchaseContactIds; // one per purchase, ordered
+  const purchaseDates = payments.purchaseDates; // parallel to purchaseIds
   const refundIds = payments.refundContactIds; // one per refund, ordered
   // Unique purchasers, most-frequent first.
   const purchaserIds = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
@@ -1028,8 +1088,14 @@ async function buildPaymentContacts(payments: GhlPayments | null): Promise<GhlMe
   const enriched = union.length ? await fetchContactsByIds(union) : new Map<string, any>();
   const seed = payments.contactSeed;
   const make = (id: string) => toContact(id, enriched.get(id), seed.get(id));
+  // One row per purchase, most-recent first, each tagged with its payment date.
+  const purchaseRows = purchaseIds
+    .map((id, i) => ({ id, at: purchaseDates[i] || "" }))
+    .sort((a, b) => (b.at || "").localeCompare(a.at || ""))
+    .slice(0, MAX_DRILLDOWN)
+    .map(({ id, at }) => ({ ...make(id), lastPurchaseAt: at || undefined }));
   return {
-    purchases: purchaseIds.slice(0, MAX_DRILLDOWN).map(make),
+    purchases: purchaseRows,
     purchasers: purchaserIds.slice(0, MAX_DRILLDOWN).map(make),
     repeatPurchasers: purchaserIds
       .filter((id) => (counts.get(id) || 0) >= 2)
@@ -1063,6 +1129,8 @@ export async function fetchGhl(range: DateRange): Promise<GhlMetrics | null> {
               organicLeads: 0,
               organicSources: [] as { label: string; value: number }[],
               paidByPlatform: { meta: 0, google: 0, other: 0 },
+              paidLeadContacts: { meta: [] as Contact[], google: [] as Contact[], other: [] as Contact[] },
+              organicSourceContacts: {} as Record<string, Contact[]>,
               paidCountries: [] as { code: string; value: number }[],
               organicCountries: [] as { code: string; value: number }[],
             };
@@ -1133,6 +1201,8 @@ export async function fetchGhl(range: DateRange): Promise<GhlMetrics | null> {
           organicLeads: leadsRes.organicLeads,
           organicSources: leadsRes.organicSources,
           paidLeadsByPlatform: leadsRes.paidByPlatform,
+          paidLeadContacts: leadsRes.paidLeadContacts,
+          organicSourceContacts: leadsRes.organicSourceContacts,
           paidCountries: leadsRes.paidCountries,
           organicCountries: leadsRes.organicCountries,
           contacts,

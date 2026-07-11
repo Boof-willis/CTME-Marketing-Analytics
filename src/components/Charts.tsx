@@ -14,6 +14,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import clsx from "clsx";
 import type { DonutSlice } from "@/lib/types";
 import { shortDate, formatNumber } from "@/lib/format";
 
@@ -120,14 +121,19 @@ export function Donut({
   centerValue,
   height = 240,
   showLegend = true,
+  onSliceClick,
 }: {
   slices: DonutSlice[];
   centerLabel?: string;
   centerValue?: string;
   height?: number;
   showLegend?: boolean;
+  /** When provided, the pie wedges + legend rows become clickable (e.g. to open
+   *  a drill-down of the leads behind a traffic source). */
+  onSliceClick?: (slice: DonutSlice) => void;
 }) {
   const total = slices.reduce((a, b) => a + b.value, 0);
+  const clickable = (s: DonutSlice) => Boolean(onSliceClick && (s.contacts?.length ?? 0) > 0);
   return (
     <div style={{ height }} className="flex w-full items-center gap-3">
       <div className="relative h-full flex-1">
@@ -144,7 +150,12 @@ export function Donut({
               isAnimationActive={false}
             >
               {slices.map((s) => (
-                <Cell key={s.label} fill={s.color} />
+                <Cell
+                  key={s.label}
+                  fill={s.color}
+                  cursor={clickable(s) ? "pointer" : undefined}
+                  onClick={clickable(s) ? () => onSliceClick!(s) : undefined}
+                />
               ))}
             </Pie>
             <Tooltip
@@ -162,15 +173,37 @@ export function Donut({
       </div>
       {showLegend ? (
       <ul className="flex max-h-full flex-col gap-1.5 overflow-y-auto pr-1 text-xs">
-        {slices.map((s) => (
-          <li key={s.label} className="flex items-center gap-2">
-            <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: s.color }} />
-            <span className="truncate text-ink-muted">{s.label}</span>
-            <span className="ml-auto font-medium text-ink">
-              {total ? Math.round((s.value / total) * 100) : 0}%
-            </span>
-          </li>
-        ))}
+        {slices.map((s) => {
+          const canClick = clickable(s);
+          return (
+            <li
+              key={s.label}
+              className={clsx(
+                "flex items-center gap-2 rounded",
+                canClick && "cursor-pointer hover:text-ink",
+              )}
+              onClick={canClick ? () => onSliceClick!(s) : undefined}
+              role={canClick ? "button" : undefined}
+              tabIndex={canClick ? 0 : undefined}
+              onKeyDown={
+                canClick
+                  ? (e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        onSliceClick!(s);
+                      }
+                    }
+                  : undefined
+              }
+            >
+              <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: s.color }} />
+              <span className="truncate text-ink-muted">{s.label}</span>
+              <span className="ml-auto font-medium text-ink">
+                {total ? Math.round((s.value / total) * 100) : 0}%
+              </span>
+            </li>
+          );
+        })}
       </ul>
       ) : null}
     </div>

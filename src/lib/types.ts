@@ -29,6 +29,9 @@ export interface Contact {
   purchaseValue?: number;
   /** Number of purchases/transactions by this contact (shown when > 1). */
   purchaseCount?: number;
+  /** ISO timestamp of this purchase (per-payment rows) — used to show and sort
+   *  the purchases drill-down by most-recent-first. */
+  lastPurchaseAt?: string;
   /** Paid via Stripe (card) — set on purchase drill-downs. */
   paidStripe?: boolean;
   /** Paid via crypto (GHL crypto-payment tag or crypto revenue field). */
@@ -66,6 +69,9 @@ export interface DonutSlice {
   label: string;
   value: number;
   color: string;
+  /** Optional drill-down: the leads/contacts behind this slice (e.g. the leads
+   *  attributed to a traffic source). */
+  contacts?: Contact[];
 }
 
 /** Lead count for a single country (ISO 3166-1 alpha-2 code, e.g. "US"). */

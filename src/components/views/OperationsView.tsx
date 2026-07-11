@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import clsx from "clsx";
 import {
   Users,
   Wallet,
@@ -10,6 +10,7 @@ import {
   CreditCard,
   CalendarClock,
   RefreshCw,
+  Infinity as InfinityIcon,
 } from "lucide-react";
 import type { DashboardData, MoneyMetrics } from "@/lib/types";
 import { KpiCard, StatTile } from "@/components/KpiCard";
@@ -21,7 +22,42 @@ import { formatCurrency, formatNumber } from "@/lib/format";
 const STRIPE_COLOR = "#635bff";
 const CRYPTO_COLOR = "#f7931a";
 
-type YearScope = number | "lifetime";
+export type YearScope = number | "lifetime";
+
+/** The single date control for the Operations tab: a year or lifetime. Lives in
+ *  the top bar (in place of the global preset picker) so the whole tab — money
+ *  cards and operational KPIs alike — responds to one selector. */
+export function ScopeSelector({
+  years,
+  scope,
+  onChange,
+}: {
+  years: number[];
+  scope: YearScope;
+  onChange: (s: YearScope) => void;
+}) {
+  return (
+    <div className="flex items-center rounded-lg border border-panel-border bg-panel-light p-0.5 text-xs">
+      {(["lifetime", ...years.slice().sort((a, b) => b - a)] as YearScope[]).map((y) => {
+        const active = y === scope;
+        return (
+          <button
+            key={String(y)}
+            onClick={() => onChange(y)}
+            className={clsx(
+              "flex items-center gap-1 rounded-md px-2.5 py-1.5 font-medium transition-colors",
+              active ? "font-semibold" : "text-ink-muted hover:text-ink",
+            )}
+            style={active ? { backgroundColor: "#beb086", color: "#0A0A0F" } : undefined}
+          >
+            {y === "lifetime" ? <InfinityIcon size={13} /> : null}
+            {y === "lifetime" ? "Lifetime" : y}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 /** Resolve the money figures for the selected scope (a single year or lifetime). */
 function scopeOf(money: MoneyMetrics, scope: YearScope) {
@@ -61,9 +97,7 @@ function freshness(iso: string | null): string {
   return `${Math.round(hrs / 24)}d ago`;
 }
 
-function Financials({ money }: { money: MoneyMetrics }) {
-  const years = money.byYear.map((y) => y.year);
-  const [scope, setScope] = useState<YearScope>("lifetime");
+function Financials({ money, scope }: { money: MoneyMetrics; scope: YearScope }) {
   const s = scopeOf(money, scope);
   const cryptoShare = s.totalRevenue ? (s.cryptoRevenue / s.totalRevenue) * 100 : 0;
   // Year bars, plus a "Legacy" bucket for lifetime revenue not attributed to any
@@ -88,31 +122,10 @@ function Financials({ money }: { money: MoneyMetrics }) {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <SectionTitle icon={Wallet}>Financials</SectionTitle>
-        <div className="flex items-center gap-3">
-          <span className="hidden items-center gap-1 text-[11px] text-ink-faint sm:flex">
-            <RefreshCw size={11} /> synced {freshness(money.lastSyncedAt)}
-          </span>
-          {/* Year / Lifetime scope — money is sourced from GHL annual + lifetime
-              fields, so it has its own selector independent of the date picker. */}
-          <div className="flex rounded-lg border border-line bg-surface/60 p-0.5 text-xs">
-            {(["lifetime", ...years.slice().sort((a, b) => b - a)] as YearScope[]).map((y) => {
-              const active = y === scope;
-              return (
-                <button
-                  key={String(y)}
-                  onClick={() => setScope(y)}
-                  className={
-                    "rounded-md px-2.5 py-1 font-medium transition-colors " +
-                    (active ? "bg-brand-gold/20 text-ink" : "text-ink-faint hover:text-ink")
-                  }
-                >
-                  {y === "lifetime" ? "Lifetime" : y}
-                </button>
-              );
-            })}
-          </div>
-        </div>
+        <SectionTitle icon={Wallet}>Financials · {scopeLabel}</SectionTitle>
+        <span className="hidden items-center gap-1 text-[11px] text-ink-faint sm:flex">
+          <RefreshCw size={11} /> synced {freshness(money.lastSyncedAt)}
+        </span>
       </div>
 
       {/* Money KPI row (scope-aware) */}
@@ -226,7 +239,7 @@ function Financials({ money }: { money: MoneyMetrics }) {
   );
 }
 
-export function OperationsView({ data }: { data: DashboardData }) {
+export function OperationsView({ data, scope }: { data: DashboardData; scope: YearScope }) {
   const o = data.overview;
   const money = data.money;
 
@@ -237,9 +250,23 @@ export function OperationsView({ data }: { data: DashboardData }) {
     ? (o.refunds.value / o.purchases.value) * 100
     : null;
 
+  // Net Revenue follows the same scope + all-in (card + crypto) money source as
+  // the Financials cards, so it reconciles with "Revenue · <scope>" instead of
+  // showing a card-only, date-clipped Stripe figure.
+  const sMoney = scopeOf(money, scope);
+  const netRevenue = sMoney.totalRevenue - sMoney.refund;
+  let netRevenueDelta: number | null = null;
+  if (scope !== "lifetime") {
+    const prev = money.byYear.find((y) => y.year === scope - 1);
+    if (prev) {
+      const prevNet = prev.revenue + prev.cryptoRevenue - prev.refund;
+      netRevenueDelta = prevNet > 0 ? ((netRevenue - prevNet) / prevNet) * 100 : null;
+    }
+  }
+
   return (
     <div className="space-y-6">
-      <Financials money={money} />
+      <Financials money={money} scope={scope} />
 
       {/* Operational KPIs (range-driven, from the funnel/CRM) */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
@@ -252,11 +279,11 @@ export function OperationsView({ data }: { data: DashboardData }) {
         />
         <KpiCard
           label="Net Revenue"
-          metric={{ ...o.revenue, value: o.netRevenue }}
-          display={formatCurrency(o.netRevenue, { compact: true })}
+          metric={{ ...o.revenue, value: netRevenue, deltaPct: netRevenueDelta }}
+          display={formatCurrency(netRevenue, { compact: true })}
           icon={CreditCard}
           color="#22d3ee"
-          sublabel="rev − refunds"
+          sublabel="rev − refunds · all-in"
         />
         <StatTile
           label="Repeat Purchase Rate"

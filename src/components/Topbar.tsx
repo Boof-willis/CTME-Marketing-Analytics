@@ -46,6 +46,7 @@ export function Topbar({
   rangeLabel,
   onRefresh,
   sourcesBadge,
+  rangeControl,
 }: {
   title: React.ReactNode;
   subtitle: string;
@@ -55,6 +56,9 @@ export function Topbar({
   rangeLabel: string;
   onRefresh: () => void;
   sourcesBadge?: React.ReactNode;
+  /** Replaces the preset/date picker with a custom control (e.g. the Operations
+   *  tab's Year / Lifetime selector), so a tab has a single date control. */
+  rangeControl?: React.ReactNode;
 }) {
   const [custom, setCustom] = useState(false);
 
@@ -68,6 +72,10 @@ export function Topbar({
       <div className="flex flex-wrap items-center gap-2">
         {sourcesBadge}
 
+        {rangeControl ? (
+          rangeControl
+        ) : (
+          <>
         <div className="flex items-center rounded-lg border border-panel-border bg-panel-light p-0.5">
           {PRESETS.map((p) => {
             const active = range.preset === p.id;
@@ -99,8 +107,10 @@ export function Topbar({
           <Calendar size={15} />
           <span className="hidden sm:inline">{range.preset === "custom" ? rangeLabel : "Custom"}</span>
         </button>
+          </>
+        )}
 
-        {custom ? (
+        {!rangeControl && custom ? (
           <div className="flex items-center gap-2">
             <input
               type="date"

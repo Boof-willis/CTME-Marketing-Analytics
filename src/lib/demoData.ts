@@ -215,8 +215,10 @@ export function buildDemoData(range: DateRange): DashboardData {
   purchaseContacts.forEach((c) => freq.set(c.id, (freq.get(c.id) || 0) + 1));
   const aovDemo = purchases.value ? revenue.value / purchases.value : 1500;
   const seenIds = new Set<string>();
-  // One row per unique buyer, carrying total spend and transaction count (mirrors
-  // the live Stripe→GHL drill-down), most valuable first.
+  // Every buyer carries a most-recent-purchase date so all drill-downs sort
+  // newest-first (mirrors the live Stripe→GHL data).
+  const dateOf = () => days[Math.floor(rnd() * days.length)] ?? days[days.length - 1];
+  // One row per unique buyer, carrying total spend + transaction count.
   const purchaserContacts: Contact[] = purchaseContacts
     .filter((c) => (seenIds.has(c.id) ? false : (seenIds.add(c.id), true)))
     .map((c) => {
@@ -228,25 +230,43 @@ export function buildDemoData(range: DateRange): DashboardData {
         purchaseValue: Math.round(count * aovDemo),
         paidStripe: true,
         paidCrypto,
+        lastPurchaseAt: dateOf(),
         tags: paidCrypto ? [...c.tags, "crypto-payment"] : c.tags,
       };
     })
-    .sort((a, b) => (b.purchaseValue || 0) - (a.purchaseValue || 0));
+    .sort((a, b) => (b.lastPurchaseAt || "").localeCompare(a.lastPurchaseAt || ""));
+  const purchaseListContacts = purchaserContacts;
   const repeatPurchaserContacts = purchaserContacts
     .filter((c) => (c.purchaseCount || 0) >= 2)
     .map((c) => ({ ...c, tags: [...c.tags, "repeat buyer"] }));
   const avgRefund = refunds.value ? refundAmount.value / refunds.value : 400;
+  // Refunds drill-down: one row per refund, newest-first, each with its date.
   const refundContacts = demoContacts(
     rnd,
     Math.min(Math.max(Math.round(refunds.value), 1), 30),
     "cold traffic",
     "refunded",
-  ).map((c) => ({ ...c, purchaseValue: Math.round(avgRefund), purchaseCount: 1, paidStripe: true }));
+  )
+    .map((c) => ({
+      ...c,
+      purchaseValue: Math.round(avgRefund),
+      purchaseCount: 1,
+      paidStripe: true,
+      lastPurchaseAt: dateOf(),
+    }))
+    .sort((a, b) => (b.lastPurchaseAt || "").localeCompare(a.lastPurchaseAt || ""));
+
+  // A bounded sample of demo leads behind each traffic-source slice, so the
+  // Leads-by-source pie + channel rows drill down like the money widgets.
+  const leadSample = (label: string, value: number): Contact[] =>
+    demoContacts(rnd, Math.min(Math.max(value, 0), 40), label.toLowerCase())
+      .map((c) => ({ ...c, lastPurchaseAt: dateOf() }))
+      .sort((a, b) => (b.lastPurchaseAt || "").localeCompare(a.lastPurchaseAt || ""));
 
   const overview: OverviewMetrics = {
     uniquePurchasers: { ...uniquePurchasers, contacts: purchaserContacts },
-    purchases: { ...purchases, contacts: purchaserContacts },
-    revenue: { ...revenue, value: Math.round(revenue.value), contacts: purchaserContacts },
+    purchases: { ...purchases, contacts: purchaseListContacts },
+    revenue: { ...revenue, value: Math.round(revenue.value), contacts: purchaseListContacts },
     refunds: { ...refunds, value: Math.round(refunds.value), contacts: refundContacts },
     refundAmount: { ...refundAmount, value: Math.round(refundAmount.value) },
     railRevenue: {
@@ -265,14 +285,18 @@ export function buildDemoData(range: DateRange): DashboardData {
       { label: "Meta Ads", value: Math.round(coldLeads * 0.82), color: "#1d8cff" },
       { label: "Google Ads", value: Math.round(coldLeads * 0.13), color: "#ea4335" },
       { label: "Other Paid", value: Math.max(0, coldLeads - Math.round(coldLeads * 0.82) - Math.round(coldLeads * 0.13)), color: "#64748b" },
-    ].filter((s) => s.value > 0),
+    ]
+      .filter((s) => s.value > 0)
+      .map((s) => ({ ...s, contacts: leadSample(s.label, s.value) })),
     organicChannels: [
       { label: "Twitter / X", value: Math.round((warmLeads + websiteLeads) * 0.4), color: "#1d9bf0" },
       { label: "Direct", value: Math.round((warmLeads + websiteLeads) * 0.24), color: "#22d3ee" },
       { label: "LinkedIn", value: Math.round((warmLeads + websiteLeads) * 0.14), color: "#0a66c2" },
       { label: "Organic Search", value: Math.round((warmLeads + websiteLeads) * 0.12), color: "#22c55e" },
       { label: "Website form", value: Math.round((warmLeads + websiteLeads) * 0.1), color: "#8b5cf6" },
-    ].filter((s) => s.value > 0),
+    ]
+      .filter((s) => s.value > 0)
+      .map((s) => ({ ...s, contacts: leadSample(s.label, s.value) })),
     averageOrderValue: purchases.value ? revenue.value / purchases.value : 0,
     lifetimeValue: uniquePurchasers.value ? revenue.value / uniquePurchasers.value : 0,
     netRevenue: revenue.value - refundAmount.value,

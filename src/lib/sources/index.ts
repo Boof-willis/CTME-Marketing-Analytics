@@ -117,16 +117,19 @@ export async function getDashboardData(range: DateRange): Promise<DashboardData>
     // Source-based channel breakdowns (attribution, not tags) so the Overview
     // matches the Paid and Organic tabs.
     const pc = ghl.paidLeadsByPlatform;
+    const plc = ghl.paidLeadContacts ?? { meta: [], google: [], other: [] };
+    const osc = ghl.organicSourceContacts ?? {};
     data.overview.paidChannels = [
-      { label: "Meta Ads", value: pc.meta, color: "#1d8cff" },
-      { label: "Google Ads", value: pc.google, color: "#ea4335" },
-      { label: "Other Paid", value: pc.other, color: "#64748b" },
+      { label: "Meta Ads", value: pc.meta, color: "#1d8cff", contacts: plc.meta },
+      { label: "Google Ads", value: pc.google, color: "#ea4335", contacts: plc.google },
+      { label: "Other Paid", value: pc.other, color: "#64748b", contacts: plc.other },
     ].filter((s) => s.value > 0);
     if (ghl.organicSources.length) {
       data.overview.organicChannels = ghl.organicSources.map((s, i) => ({
         label: s.label,
         value: s.value,
         color: sourceColor(s.label, i),
+        contacts: osc[s.label] || [],
       }));
     }
 
@@ -355,6 +358,40 @@ export async function getDashboardData(range: DateRange): Promise<DashboardData>
     };
   }
 
+  // ---- Overview unique purchasers: card + crypto. Keep Stripe's reliable
+  // (customer-id) card count and add crypto buyers who didn't also pay by card,
+  // deduped by email — so the count counts distinct buyers across both rails and
+  // stays consistent with the Purchases card + the purchasers drill-down. ----
+  if (stripe) {
+    const norm = (s: string | null | undefined) => (s ? s.toLowerCase().trim() : "");
+    const cardEmails = new Set(stripe.buyers.map((b) => norm(b.email)).filter(Boolean));
+    // Distinct crypto buyers NOT already among the card buyers (by email).
+    const cryptoOnly = (txns: typeof cryptoTxInRange, cardSet: Set<string>) => {
+      const set = new Set<string>();
+      txns.forEach((t, i) => {
+        const em = norm(t.email);
+        if (em && cardSet.has(em)) return; // paid by card too — already counted
+        set.add(em || norm(t.name) || `crypto:${i}`);
+      });
+      return set.size;
+    };
+    const curUnique = stripe.uniquePurchasers + cryptoOnly(cryptoTxInRange, cardEmails);
+    let upDelta: number | null = null;
+    if (!range.lifetime && stripePrev && prevRange) {
+      const prevCardEmails = new Set(stripePrev.buyers.map((b) => norm(b.email)).filter(Boolean));
+      const prevCryptoTx = data.money.cryptoTx.filter(
+        (t) => t.date >= prevRange.start && t.date <= prevRange.end,
+      );
+      const prevUnique = stripePrev.uniquePurchasers + cryptoOnly(prevCryptoTx, prevCardEmails);
+      upDelta = prevUnique > 0 ? ((curUnique - prevUnique) / prevUnique) * 100 : null;
+    }
+    data.overview.uniquePurchasers = {
+      ...data.overview.uniquePurchasers,
+      value: curUnique,
+      deltaPct: upDelta,
+    };
+  }
+
   // Overview AOV = all-in revenue (card + crypto) in the window ÷ all-in
   // transactions in the window, so it matches the Revenue + Purchases cards.
   data.overview.averageOrderValue =
@@ -508,21 +545,25 @@ async function applyStripeContacts(
   const aggregate = (rows: StripeBuyer[]): Contact[] => {
     const key = (b: StripeBuyer, i: number) =>
       (b.email && b.email.toLowerCase().trim()) || (b.name && b.name.toLowerCase().trim()) || `anon:${i}`;
-    const agg = new Map<string, { rep: StripeBuyer; index: number; value: number; count: number }>();
+    const agg = new Map<
+      string,
+      { rep: StripeBuyer; index: number; value: number; count: number; lastAt: string }
+    >();
     rows.forEach((b, i) => {
       const k = key(b, i);
       const cur = agg.get(k);
       if (cur) {
         cur.value += b.amount;
         cur.count += 1;
+        if ((b.date || "") > cur.lastAt) cur.lastAt = b.date || "";
       } else {
-        agg.set(k, { rep: b, index: i, value: b.amount, count: 1 });
+        agg.set(k, { rep: b, index: i, value: b.amount, count: 1, lastAt: b.date || "" });
       }
     });
     return [...agg.values()]
       .sort((a, b) => b.value - a.value) // most valuable first
       .slice(0, CAP)
-      .map(({ rep, index, value, count }) => {
+      .map(({ rep, index, value, count, lastAt }) => {
         const base = toContact(rep, index);
         return {
           ...base,
@@ -530,6 +571,7 @@ async function applyStripeContacts(
           purchaseCount: count,
           paidStripe: true,
           paidCrypto: hasCryptoTag(base),
+          lastPurchaseAt: lastAt || undefined,
         };
       });
   };
@@ -543,6 +585,7 @@ async function applyStripeContacts(
       if (cur) {
         cur.purchaseValue = (cur.purchaseValue || 0) + t.amount;
         cur.purchaseCount = (cur.purchaseCount || 0) + 1;
+        if ((t.date || "") > (cur.lastPurchaseAt || "")) cur.lastPurchaseAt = t.date;
       } else {
         map.set(k, {
           id: `crypto:${k}`,
@@ -555,6 +598,7 @@ async function applyStripeContacts(
           purchaseCount: 1,
           paidStripe: false,
           paidCrypto: true,
+          lastPurchaseAt: t.date,
         });
       }
     });
@@ -574,18 +618,32 @@ async function applyStripeContacts(
         existing.paidCrypto = true;
         existing.purchaseValue = (existing.purchaseValue || 0) + (cb.purchaseValue || 0);
         if (cb.purchaseCount) existing.purchaseCount = (existing.purchaseCount || 0) + cb.purchaseCount;
+        if ((cb.lastPurchaseAt || "") > (existing.lastPurchaseAt || "")) {
+          existing.lastPurchaseAt = cb.lastPurchaseAt;
+        }
       } else {
         list.push({ ...cb });
       }
     }
-    return list.sort((a, b) => (b.purchaseValue || 0) - (a.purchaseValue || 0)).slice(0, CAP);
+    // Most-recent purchaser first, so the capped sample is the newest buyers
+    // (matches the drill-down's most-recent-first display order).
+    return list
+      .sort((a, b) => (b.lastPurchaseAt || "").localeCompare(a.lastPurchaseAt || ""))
+      .slice(0, CAP);
   };
 
   // Purchases drill-down = ONE ROW PER TRANSACTION (card charge + crypto payment
   // in the window), so the row count matches the Purchases card exactly.
   const cardPurchaseRows: Contact[] = stripe.buyers.map((b, i) => {
     const base = toContact(b, i);
-    return { ...base, purchaseValue: b.amount, purchaseCount: 1, paidStripe: true, paidCrypto: hasCryptoTag(base) };
+    return {
+      ...base,
+      purchaseValue: b.amount,
+      purchaseCount: 1,
+      paidStripe: true,
+      paidCrypto: hasCryptoTag(base),
+      lastPurchaseAt: b.date,
+    };
   });
   const cryptoPurchaseRows: Contact[] = cryptoTxInRange.map((t, i) => ({
     id: `cryptotx:${(t.email || t.name || "x").toLowerCase()}:${t.date}:${i}`,
@@ -598,28 +656,35 @@ async function applyStripeContacts(
     purchaseCount: 1,
     paidStripe: false,
     paidCrypto: true,
+    lastPurchaseAt: t.date,
   }));
+  // Purchases drill-down lists newest transaction first (most recent → least).
   const perPurchase = [...cardPurchaseRows, ...cryptoPurchaseRows]
-    .sort((a, b) => (b.purchaseValue || 0) - (a.purchaseValue || 0))
+    .sort((a, b) => (b.lastPurchaseAt || "").localeCompare(a.lastPurchaseAt || ""))
     .slice(0, CAP);
 
   // Unique Purchasers + Revenue drill into one row per unique buyer.
   const purchasers = mergeCrypto(aggregate(stripe.buyers));
   const repeat = purchasers.filter((c) => (c.purchaseCount || 0) >= 2);
+  // Revenue lists the same buyers but newest purchase first (Unique Purchasers
+  // keeps the by-spend ordering).
+  const revenueContacts = [...purchasers].sort((a, b) =>
+    (b.lastPurchaseAt || "").localeCompare(a.lastPurchaseAt || ""),
+  );
 
   // Refunds drill-down = one row per refund (Stripe only — crypto refunds aren't
-  // tracked as dated records), so its count matches the Refunds card.
+  // tracked as dated records), newest refund first, each tagged with its date.
   const refundRows = stripe.refundBuyers
     .map((b, i) => {
       const base = toContact(b, i);
-      return { ...base, purchaseValue: b.amount, purchaseCount: 1, paidStripe: true };
+      return { ...base, purchaseValue: b.amount, purchaseCount: 1, paidStripe: true, lastPurchaseAt: b.date };
     })
-    .sort((a, b) => (b.purchaseValue || 0) - (a.purchaseValue || 0))
+    .sort((a, b) => (b.lastPurchaseAt || "").localeCompare(a.lastPurchaseAt || ""))
     .slice(0, CAP);
 
   data.overview.purchases.contacts = perPurchase;
   data.overview.uniquePurchasers.contacts = purchasers;
-  data.overview.revenue.contacts = purchasers;
+  data.overview.revenue.contacts = revenueContacts;
   data.overview.refunds.contacts = refundRows;
   data.overview.repeatPurchaserContacts = repeat;
 }

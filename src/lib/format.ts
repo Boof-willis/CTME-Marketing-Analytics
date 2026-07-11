@@ -44,3 +44,25 @@ export function shortDate(iso: string): string {
   const d = new Date(iso + "T00:00:00");
   return `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`;
 }
+
+/** Capitalize the first letter of each word in a contact name (e.g.
+ *  "tobias dahlberg" → "Tobias Dahlberg"). The rest of each word is left as-is
+ *  so intentional casing like "McIntyre" survives, and email-style fallback
+ *  names (no real name on the record) are returned untouched. */
+export function titleCaseName(name: string): string {
+  if (!name || name.includes("@")) return name;
+  return name.replace(/\S+/g, (w) => w.charAt(0).toUpperCase() + w.slice(1));
+}
+
+/** Format a full ISO timestamp as a compact, readable date (e.g. "Jul 9, 2026").
+ *  Returns "—" for missing/unparseable values. */
+export function formatDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(d);
+}

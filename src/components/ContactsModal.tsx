@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import clsx from "clsx";
 import { Mail, Phone, ExternalLink, X, Users } from "lucide-react";
 import type { Contact } from "@/lib/types";
-import { formatCurrency, formatNumber } from "@/lib/format";
+import { formatCurrency, formatNumber, formatDate, titleCaseName } from "@/lib/format";
 
 /** Modal listing the contacts behind a widget as a scrolling table
  *  (name, contact info, spend, transactions, link). */
@@ -25,6 +25,13 @@ export function ContactsModal({
 }) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
+
+  // Every drill-down table reads most-recent → least-recent. Rows carry a date
+  // (purchase date, or a lead's date added); those without one keep their order.
+  const rows = useMemo(
+    () => [...contacts].sort((a, b) => (b.lastPurchaseAt || "").localeCompare(a.lastPurchaseAt || "")),
+    [contacts],
+  );
 
   // Client-side pagination keeps the table fast even with hundreds of rows.
   const [page, setPage] = useState(0);
@@ -49,18 +56,19 @@ export function ContactsModal({
 
   if (!mounted || !open) return null;
 
-  const shown = contacts.length;
+  const shown = rows.length;
   const sampled = typeof total === "number" && total > shown;
   // Only purchase/refund drill-downs carry per-contact money; hide those columns
   // for plain contact lists (e.g. leads). Likewise hide Tags when none exist.
-  const hasValue = contacts.some((c) => typeof c.purchaseValue === "number");
-  const hasTags = contacts.some((c) => c.tags.length > 0);
-  const hasPayment = contacts.some((c) => c.paidStripe || c.paidCrypto);
+  const hasValue = rows.some((c) => typeof c.purchaseValue === "number");
+  const hasTags = rows.some((c) => c.tags.length > 0);
+  const hasPayment = rows.some((c) => c.paidStripe || c.paidCrypto);
+  const hasDate = rows.some((c) => c.lastPurchaseAt);
 
   const pageCount = Math.max(1, Math.ceil(shown / pageSize));
   const safePage = Math.min(page, pageCount - 1);
   const start = safePage * pageSize;
-  const pageItems = contacts.slice(start, start + pageSize);
+  const pageItems = rows.slice(start, start + pageSize);
 
   return createPortal(
     <div
@@ -114,6 +122,7 @@ export function ContactsModal({
                   {hasPayment ? <th className="px-4 py-2.5 font-medium">Paid via</th> : null}
                   {hasValue ? <th className="px-4 py-2.5 text-right font-medium">Spend</th> : null}
                   {hasValue ? <th className="px-4 py-2.5 text-right font-medium">Txns</th> : null}
+                  {hasDate ? <th className="px-4 py-2.5 text-right font-medium">Date</th> : null}
                   <th className="px-4 py-2.5" />
                 </tr>
               </thead>
@@ -125,6 +134,7 @@ export function ContactsModal({
                     showValue={hasValue}
                     showTags={hasTags}
                     showPayment={hasPayment}
+                    showDate={hasDate}
                   />
                 ))}
               </tbody>
@@ -183,16 +193,18 @@ function ContactRow({
   showValue,
   showTags,
   showPayment,
+  showDate,
 }: {
   contact: Contact;
   showValue: boolean;
   showTags: boolean;
   showPayment: boolean;
+  showDate: boolean;
 }) {
   return (
     <tr className="border-b border-panel-border/50 transition-colors hover:bg-panel-light/40">
       <td className="max-w-[14rem] px-4 py-2.5 align-top">
-        <div className="truncate font-medium text-ink">{c.name}</div>
+        <div className="truncate font-medium text-ink">{titleCaseName(c.name)}</div>
       </td>
       <td className="max-w-[16rem] px-4 py-2.5 align-top">
         <div className="flex flex-col gap-0.5">
@@ -273,6 +285,11 @@ function ContactRow({
       {showValue ? (
         <td className="whitespace-nowrap px-4 py-2.5 text-right align-top text-sm text-ink-muted">
           {typeof c.purchaseCount === "number" ? formatNumber(c.purchaseCount) : "—"}
+        </td>
+      ) : null}
+      {showDate ? (
+        <td className="whitespace-nowrap px-4 py-2.5 text-right align-top text-sm text-ink-muted">
+          {c.lastPurchaseAt ? formatDate(c.lastPurchaseAt) : "—"}
         </td>
       ) : null}
       <td className="px-4 py-2.5 text-right align-top">
