@@ -242,6 +242,10 @@ export async function getDashboardData(range: DateRange): Promise<DashboardData>
       org.appointments = metric(wm.scheduled, org.appointments.series, null);
       org.callsCompleted = metric(wm.held, org.callsCompleted.series, null);
       org.noShows = metric(wm.noShows, org.noShows.series, null);
+      // Drill-downs: the warm-tagged contacts behind each meeting stage.
+      org.appointments.contacts = wm.scheduledContacts;
+      org.callsCompleted.contacts = wm.heldContacts;
+      org.noShows.contacts = wm.noShowContacts;
     } else {
       org.appointments = metric(Math.max(0, ghl.appointments - ghl.coldAppointments), org.appointments.series, null);
       org.callsCompleted = metric(Math.max(0, ghl.callsCompleted - ghl.coldCallsCompleted), org.callsCompleted.series, null);
@@ -270,9 +274,19 @@ export async function getDashboardData(range: DateRange): Promise<DashboardData>
       org.revenue.contacts = warmBuyers;
     }
     if (ghl.organicSources.length) {
-      org.sources = ghl.organicSources.map((s, i) => ({ label: s.label, value: s.value, color: sourceColor(s.label, i) }));
+      org.sources = ghl.organicSources.map((s, i) => ({
+        label: s.label,
+        value: s.value,
+        color: sourceColor(s.label, i),
+        contacts: ghl.organicSourceContacts?.[s.label] || [],
+      }));
     }
-    if (ghl.organicCountries.length) org.countries = ghl.organicCountries;
+    if (ghl.organicCountries.length) {
+      org.countries = ghl.organicCountries.map((c) => ({
+        ...c,
+        contacts: ghl.organicCountryContacts?.[c.code] || [],
+      }));
+    }
     org.callCompletedRate = org.appointments.value ? (org.callsCompleted.value / org.appointments.value) * 100 : 0;
     org.closeRate = org.callsCompleted.value ? (org.purchases.value / org.callsCompleted.value) * 100 : 0;
     org.noShowRate = org.appointments.value ? (org.noShows.value / org.appointments.value) * 100 : 0;

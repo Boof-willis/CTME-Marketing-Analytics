@@ -79,6 +79,8 @@ export interface CountryCount {
   /** ISO 3166-1 alpha-2 code, or "??" when unknown. */
   code: string;
   value: number;
+  /** Optional drill-down: the leads behind this country. */
+  contacts?: Contact[];
 }
 
 /** Top-level "Overall" dashboard metrics required by CTME. */
@@ -140,6 +142,8 @@ export interface OrganicSource {
   label: string;
   value: number;
   color: string;
+  /** Optional drill-down: the leads behind this source. */
+  contacts?: Contact[];
 }
 
 /** Organic ("warm" in CTME's vocabulary) traffic dashboard metrics. */

@@ -36,14 +36,15 @@ const VIEW_META: Record<ViewId, { title: React.ReactNode; subtitle: string; acce
   overview: { title: "Marketing Overview", subtitle: "All traffic · purchases, revenue, refunds & leads", accent: "#beb086" },
   operations: { title: "Operations", subtitle: "Purchasers, net revenue, refunds & retention", accent: "#beb086" },
   paid: { title: "Paid Traffic", subtitle: "Paid acquisition funnel — Meta & Google ads", accent: "#beb086" },
-  organic: { title: "Warm Traffic", subtitle: "Organic leads handed to the sales team — meetings, calls & closes", accent: "#22c55e" },
+  organic: { title: "Warm Traffic", subtitle: "Organic leads handed to the sales team — meetings, calls & closes", accent: "#beb086" },
   analytics: { title: "Web Analytics", subtitle: "Website traffic & engagement — Google Analytics 4", accent: "#beb086" },
 };
 
 const PAID_TABS = [
   { id: "all" as const, label: "All", icon: LayoutGrid },
   { id: "meta" as const, label: "Meta Ads", icon: MetaMark as unknown as React.ElementType },
-  { id: "google" as const, label: "Google Ads", icon: GoogleMark as unknown as React.ElementType },
+  // Google Ads selector hidden for now — re-add to show the Google Ads sub-tab.
+  // { id: "google" as const, label: "Google Ads", icon: GoogleMark as unknown as React.ElementType },
 ];
 
 export default function Page() {

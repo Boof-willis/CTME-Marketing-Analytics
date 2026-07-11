@@ -63,8 +63,16 @@ export interface GhlMetrics {
   payments: GhlPayments | null;
   /** Warm sales funnel scoped to warm-tagged contacts, one count per lead
    *  (distinct contacts), so reschedules don't inflate it. Null when the warm
-   *  contact set is unavailable (falls back to calendar-based counts). */
-  warmMeetings: { scheduled: number; held: number; noShows: number } | null;
+   *  contact set is unavailable (falls back to calendar-based counts). The
+   *  *Contacts arrays are bounded drill-down samples for each stage. */
+  warmMeetings: {
+    scheduled: number;
+    held: number;
+    noShows: number;
+    scheduledContacts: Contact[];
+    heldContacts: Contact[];
+    noShowContacts: Contact[];
+  } | null;
   /** Average of the GHL "Lifetime Value" custom field over contacts with value>0. */
   ltv: { average: number; count: number } | null;
   /** Stripe/crypto money aggregates synced onto contacts as custom fields.
@@ -81,6 +89,9 @@ export interface GhlMetrics {
   /** Drill-down lead contacts per organic source label (bounded sample),
    *  keyed to match {@link organicSources} labels. */
   organicSourceContacts: Record<string, Contact[]>;
+  /** Drill-down organic lead contacts per country code (bounded sample),
+   *  keyed to match {@link organicCountries} codes (incl. "OTHER"). */
+  organicCountryContacts: Record<string, Contact[]>;
   /** Paid leads by country (ISO-2 code), largest first. */
   paidCountries: { code: string; value: number }[];
   /** Organic leads by country (ISO-2 code), largest first. */
@@ -344,6 +355,7 @@ async function countLeads(range: DateRange) {
   const paidByPlatform = { meta: 0, google: 0, other: 0 };
   const paidCountryMap = new Map<string, number>();
   const organicCountryMap = new Map<string, number>();
+  const organicCountryLeadContacts = new Map<string, Contact[]>();
   let organicLeads = 0;
   const pageLimit = 100;
   const maxPages = 80;
@@ -407,6 +419,9 @@ async function countLeads(range: DateRange) {
         if (!arr) organicLeadContacts.set(s, (arr = []));
         sample(arr);
         organicCountryMap.set(code, (organicCountryMap.get(code) || 0) + 1);
+        let cArr = organicCountryLeadContacts.get(code);
+        if (!cArr) organicCountryLeadContacts.set(code, (cArr = []));
+        sample(cArr);
       }
     }
   };
@@ -457,6 +472,26 @@ async function countLeads(range: DateRange) {
   const paidCountries = rankTop(paidCountryMap, 8, "OTHER");
   const organicCountries = rankTop(organicCountryMap, 8, "OTHER");
 
+  // Lead-contact samples keyed to the final organicCountries codes, folding any
+  // overflow + unknown ("??") into the "OTHER" bucket so each row is a drill-down.
+  const topCodes = new Set(organicCountries.map((c) => c.code));
+  const organicCountryContacts: Record<string, Contact[]> = {};
+  for (const { code } of organicCountries) {
+    if (code === "OTHER") continue;
+    organicCountryContacts[code] = organicCountryLeadContacts.get(code) || [];
+  }
+  if (topCodes.has("OTHER")) {
+    const other: Contact[] = [];
+    for (const [code, arr] of organicCountryLeadContacts) {
+      if (topCodes.has(code)) continue; // already its own top-8 row
+      for (const ct of arr) {
+        if (other.length >= MAX_DRILLDOWN) break;
+        other.push(ct);
+      }
+    }
+    organicCountryContacts["OTHER"] = other;
+  }
+
   return {
     counts,
     coldIds,
@@ -468,6 +503,7 @@ async function countLeads(range: DateRange) {
     paidByPlatform,
     paidLeadContacts,
     organicSourceContacts,
+    organicCountryContacts,
     paidCountries,
     organicCountries,
   };
@@ -863,10 +899,12 @@ async function countAppointments(range: DateRange) {
   const cold = { appointments: 0, callsCompleted: 0, noShows: 0 };
   // Distinct contact ids per stage (any calendar), so the warm funnel can count
   // one meeting per lead — reschedules/follow-ups collapse to a single contact.
+  // Value = the contact's most recent appointment date (ISO) for that stage, so
+  // the drill-downs can sort most-recent first.
   const apptContacts = {
-    scheduled: new Set<string>(),
-    held: new Set<string>(),
-    noShow: new Set<string>(),
+    scheduled: new Map<string, string>(),
+    held: new Map<string, string>(),
+    noShow: new Map<string, string>(),
   };
 
   for (const cal of calendars) {
@@ -910,12 +948,23 @@ async function countAppointments(range: DateRange) {
         if (completed) cold.callsCompleted += 1;
         if (noShow) cold.noShows += 1;
       }
-      // Track the contact behind each appointment (one entry per contact/stage).
+      // Track the contact behind each appointment (one entry per contact/stage),
+      // keeping their most recent appointment date for that stage.
       const cid = e.contactId || (e.contact && e.contact.id) || null;
       if (cid) {
-        apptContacts.scheduled.add(String(cid));
-        if (completed) apptContacts.held.add(String(cid));
-        if (noShow) apptContacts.noShow.add(String(cid));
+        const id = String(cid);
+        const at = e.startTime
+          ? new Date(e.startTime).toISOString()
+          : e.endTime
+            ? new Date(e.endTime).toISOString()
+            : "";
+        const put = (m: Map<string, string>) => {
+          const prev = m.get(id);
+          if (prev === undefined || at > prev) m.set(id, at);
+        };
+        put(apptContacts.scheduled);
+        if (completed) put(apptContacts.held);
+        if (noShow) put(apptContacts.noShow);
       }
     }
   }
@@ -1131,6 +1180,7 @@ export async function fetchGhl(range: DateRange): Promise<GhlMetrics | null> {
               paidByPlatform: { meta: 0, google: 0, other: 0 },
               paidLeadContacts: { meta: [] as Contact[], google: [] as Contact[], other: [] as Contact[] },
               organicSourceContacts: {} as Record<string, Contact[]>,
+              organicCountryContacts: {} as Record<string, Contact[]>,
               paidCountries: [] as { code: string; value: number }[],
               organicCountries: [] as { code: string; value: number }[],
             };
@@ -1141,7 +1191,11 @@ export async function fetchGhl(range: DateRange): Promise<GhlMetrics | null> {
             return {
               totals: { appointments: 0, callsCompleted: 0, noShows: 0 },
               cold: { appointments: 0, callsCompleted: 0, noShows: 0 },
-              apptContacts: { scheduled: new Set<string>(), held: new Set<string>(), noShow: new Set<string>() },
+              apptContacts: {
+                scheduled: new Map<string, string>(),
+                held: new Map<string, string>(),
+                noShow: new Map<string, string>(),
+              },
             };
           }),
         ]);
@@ -1168,15 +1222,41 @@ export async function fetchGhl(range: DateRange): Promise<GhlMetrics | null> {
         let warmMeetings: GhlMetrics["warmMeetings"] = null;
         if (money && money.warmIds.length) {
           const warmSet = new Set(money.warmIds);
-          const inWarm = (s: Set<string>) => {
+          const warmById = new Map(money.warmContacts.map((c) => [c.id, c]));
+          const inWarm = (m: Map<string, string>) => {
             let n = 0;
-            for (const id of s) if (warmSet.has(id)) n += 1;
+            for (const id of m.keys()) if (warmSet.has(id)) n += 1;
             return n;
+          };
+          // Warm-tagged attendees at a stage, tagged with their appointment date
+          // and stripped of purchase money (these tables are about who attended,
+          // not spend), most-recent first. Bounded to the drill-down cap.
+          const stageContacts = (m: Map<string, string>): Contact[] => {
+            const out: Contact[] = [];
+            for (const [id, at] of m) {
+              if (!warmSet.has(id)) continue;
+              const c = warmById.get(id);
+              if (!c) continue;
+              out.push({
+                id: c.id,
+                name: c.name,
+                email: c.email,
+                phone: c.phone,
+                tags: c.tags,
+                url: c.url,
+                lastPurchaseAt: at || undefined,
+              });
+              if (out.length >= MAX_DRILLDOWN) break;
+            }
+            return out.sort((a, b) => (b.lastPurchaseAt || "").localeCompare(a.lastPurchaseAt || ""));
           };
           warmMeetings = {
             scheduled: inWarm(appts.apptContacts.scheduled),
             held: inWarm(appts.apptContacts.held),
             noShows: inWarm(appts.apptContacts.noShow),
+            scheduledContacts: stageContacts(appts.apptContacts.scheduled),
+            heldContacts: stageContacts(appts.apptContacts.held),
+            noShowContacts: stageContacts(appts.apptContacts.noShow),
           };
         }
 
@@ -1203,6 +1283,7 @@ export async function fetchGhl(range: DateRange): Promise<GhlMetrics | null> {
           paidLeadsByPlatform: leadsRes.paidByPlatform,
           paidLeadContacts: leadsRes.paidLeadContacts,
           organicSourceContacts: leadsRes.organicSourceContacts,
+          organicCountryContacts: leadsRes.organicCountryContacts,
           paidCountries: leadsRes.paidCountries,
           organicCountries: leadsRes.organicCountries,
           contacts,

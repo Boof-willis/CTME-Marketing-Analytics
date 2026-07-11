@@ -325,17 +325,41 @@ export function buildDemoData(range: DateRange): DashboardData {
     { label: "Website form", frac: 0.07, color: "#8b5cf6" },
     { label: "Other", frac: 0.05, color: "#64748b" },
   ];
+  // Drill-down samples behind each warm card — a shared pool of warm-tagged
+  // contacts, sliced per stage, each dated + sorted most-recent-first.
+  const warmDate = () => days[Math.floor(rnd() * days.length)] ?? days[days.length - 1];
+  const warmPool = demoContacts(rnd, Math.min(Math.max(Math.round(ol), 8), 60), "warm traffic");
+  const warmSlice = (n: number, extra?: (c: Contact) => Partial<Contact>): Contact[] =>
+    warmPool
+      .slice(0, Math.min(Math.max(Math.round(n), 0), warmPool.length))
+      .map((c) => ({ ...c, lastPurchaseAt: warmDate(), ...(extra ? extra(c) : {}) }))
+      .sort((a, b) => (b.lastPurchaseAt || "").localeCompare(a.lastPurchaseAt || ""));
+  const orgAov = orgPurch.value ? orgRevenue.value / orgPurch.value : 1500;
+  const warmBuyers = warmSlice(orgPurch.value, () => ({
+    purchaseValue: Math.round(orgAov),
+    purchaseCount: 1,
+    paidStripe: true,
+  }));
+  // Lead samples behind each channel / country (dated, newest-first).
+  const leadSampleWarm = (label: string, n: number): Contact[] =>
+    demoContacts(rnd, Math.min(Math.max(Math.round(n), 0), 40), label.toLowerCase())
+      .map((c) => ({ ...c, lastPurchaseAt: warmDate() }))
+      .sort((a, b) => (b.lastPurchaseAt || "").localeCompare(a.lastPurchaseAt || ""));
+
   const organic: OrganicMetrics = {
-    leads: orgLeads,
-    appointments: orgAppts,
-    callsCompleted: orgCalls,
-    noShows: orgNoShows,
-    purchases: orgPurch,
-    revenue: { ...orgRevenue, value: Math.round(orgRevenue.value) },
-    sources: orgSourceCounts.map((s) => ({ label: s.label, value: Math.max(0, Math.round(ol * s.frac)), color: s.color })),
+    leads: { ...orgLeads, contacts: warmSlice(ol) },
+    appointments: { ...orgAppts, contacts: warmSlice(orgAppts.value) },
+    callsCompleted: { ...orgCalls, contacts: warmSlice(orgCalls.value) },
+    noShows: { ...orgNoShows, contacts: warmSlice(orgNoShows.value) },
+    purchases: { ...orgPurch, contacts: warmBuyers },
+    revenue: { ...orgRevenue, value: Math.round(orgRevenue.value), contacts: warmBuyers },
+    sources: orgSourceCounts.map((s) => {
+      const value = Math.max(0, Math.round(ol * s.frac));
+      return { label: s.label, value, color: s.color, contacts: leadSampleWarm(s.label, value) };
+    }),
     countries: countryMix(orgLeads.value, [
       ["US", 0.5], ["AU", 0.18], ["GB", 0.1], ["CA", 0.08], ["NZ", 0.05], ["HK", 0.03], ["??", 0.06],
-    ]),
+    ]).map((c) => ({ ...c, contacts: leadSampleWarm(c.code, c.value) })),
     funnel: funnel([
       { label: "Meetings Scheduled", value: orgAppts.value },
       { label: "Meetings Held", value: orgCalls.value },

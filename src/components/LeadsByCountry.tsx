@@ -1,8 +1,11 @@
 "use client";
 
+import { useState } from "react";
+import clsx from "clsx";
 import { Globe } from "lucide-react";
-import type { CountryCount } from "@/lib/types";
+import type { Contact, CountryCount } from "@/lib/types";
 import { SectionTitle } from "@/components/ui";
+import { ContactsModal } from "@/components/ContactsModal";
 import { formatNumber } from "@/lib/format";
 
 // Resolve a human country name from an ISO 3166-1 alpha-2 code. Uses the
@@ -41,6 +44,7 @@ export function LeadsByCountry({
 }) {
   const total = countries.reduce((a, c) => a + c.value, 0);
   const max = countries.reduce((a, c) => Math.max(a, c.value), 0) || 1;
+  const [drill, setDrill] = useState<{ title: string; contacts: Contact[]; total: number } | null>(null);
 
   return (
     <div className="card p-5">
@@ -52,8 +56,32 @@ export function LeadsByCountry({
           {countries.map((c) => {
             const pct = total ? Math.round((c.value / total) * 100) : 0;
             const barPct = Math.max(4, (c.value / max) * 100);
+            const canClick = (c.contacts?.length ?? 0) > 0;
+            const open = () =>
+              canClick &&
+              setDrill({ title: `${countryName(c.code)} leads`, contacts: c.contacts!, total: c.value });
             return (
-              <div key={c.code} className="flex items-center gap-3">
+              <div
+                key={c.code}
+                className={clsx(
+                  "-mx-1.5 flex items-center gap-3 rounded px-1.5 py-0.5",
+                  canClick && "cursor-pointer hover:bg-panel-light/50",
+                )}
+                onClick={canClick ? open : undefined}
+                role={canClick ? "button" : undefined}
+                tabIndex={canClick ? 0 : undefined}
+                onKeyDown={
+                  canClick
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          open();
+                        }
+                      }
+                    : undefined
+                }
+                title={canClick ? `View ${countryName(c.code)} leads` : undefined}
+              >
                 <span className="w-6 shrink-0 text-center text-lg leading-none" aria-hidden>
                   {flag(c.code)}
                 </span>
@@ -70,6 +98,15 @@ export function LeadsByCountry({
       ) : (
         <p className="text-sm text-ink-faint">No leads in this period.</p>
       )}
+      {drill ? (
+        <ContactsModal
+          open
+          onClose={() => setDrill(null)}
+          title={drill.title}
+          contacts={drill.contacts}
+          total={drill.total}
+        />
+      ) : null}
     </div>
   );
 }
